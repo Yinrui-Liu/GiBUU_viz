@@ -1,0 +1,140 @@
+!--------------------------------------------------------- -*- fortran -*- ----
+! sample jobcard for Deltas in a box of nucleons
+!------------------------------------------------------------------------------
+! please visit the GiBUU homepage for further information:
+! https://gibuu.hepforge.org
+!------------------------------------------------------------------------------
+! This jobcard is for calculating interaction rates of a Delta in a nuclear
+! medium. Therefore special choices are done:
+! * real particles (the nucleons) are frozen
+! * only one single timestep, which is quite large.
+!   This is in order to avoid contamination of Deltas, which may have ondergone
+!   a previous collision (e.g. Delta N -> Delta N) with a reassignment of
+!   charge and/or mass.
+!   Even in a single timestep, the 1-body decays may influence the rate
+!   of 2-body and 3-body collisions and 2-body collisions influence 3-body.
+!   So it may be preferable, to calculate these processes in different runs
+! * a small box size (but not too small; even at low densities the number of
+!   nucleons per ensemble should not be smaller than ~10)
+! * Vacuum kinematics are assumed, i.e. no potentials.
+! * flag 'mediumSwitch_Delta' is responsible for using Oset's widths
+!   (only in this case one has DeltaNN -> NNN interactions)
+! * Numbers on how often a process happened are listed in VariRate.rates.dat.
+!   To get a physical quantity, numbers from this file have to be divided
+!   by the total number of Deltas and the timestep size.
+!
+!   This is a simplification for short time intervals and small velocities.
+!   The probability for an event to happen is given by
+!      P = 1 - exp(-Gamma*t/gamma_L) =~ Gamma*t
+!   where gamma_L is the Lorentz-Gamma, since widths are given in the rest frame
+!   of the particle, and t is the time (here the timestep size)
+!
+!   Lorentz-gamma gamma_L is in the order 1.0-1.1, i.e. a 10% effect
+!------------------------------------------------------------------------------
+
+
+! file: ./inputOutput/inputGeneral.f90
+&input
+      eventtype       =    33     ! Deltas in a Box of nucleons
+      numEnsembles    = 10000
+      numTimeSteps    =     1
+      delta_T         =   0.2     ! time step size [fm]
+      freezeRealParticles     = T
+      continousBoundaries     = T
+
+!      printParticleVectors    = T
+
+      localEnsemble   = T
+      length_perturbative = 250 ! without pauli blocking
+      length_real         = 100
+
+!      DoPrLevel(1) = .FALSE. ! set this for production runs
+!      DoPrLevel(2) = .FALSE. ! set this for production runs
+
+      path_To_Input   = '~/GiBUU/buuinput'
+      version = 2025
+/
+
+! file: ./init/initInABox.f90
+&InABox
+      fermiMotion=.true.
+!      proton_Density=0.084
+!      neutron_Density=0.084
+/
+
+! file: ./init/initInABoxDelta.f90
+&InABoxDelta
+!      mass = 1.2
+!      charge = +1
+!      mom = 0.100
+!      nDelta = 50
+/
+
+! file: ./density/density.f90
+&initDensity
+      densitySwitch = 3  ! 3=analytic density
+
+      gridsize(1)=4. ! size of the box [fm]
+      gridsize(2)=4.
+      gridsize(3)=4.
+
+      gridPoints(1)=8
+      gridPoints(2)=8
+      gridPoints(3)=8
+/
+
+! file: ./density/pauliBlocking.f90
+&initPauli
+      pauliSwitch = 2 ! 0: no Pauli blocking, 1: dynamic, 2: analytic
+/
+
+! file: ./database/particleProperties.f90
+&initDatabase
+!      propagationSwitch = 0 ! 0=all resonances with more than 1 star
+/
+
+! file: ./width/baryonWidthMedium.f90
+&width_Baryon
+      mediumSwitch       = T ! use in medium width for all baryons
+      mediumSwitch_Delta = T ! use in medium width for Delta
+/
+
+! file: ./potential/baryonPotential.f90
+&baryonPotential
+      EQS_TYPE  = 0
+      DeltaPot  = 0
+/
+
+! file: ./collisions/collisionTerm.f90
+&collisionterm
+      oneBodyProcesses = F
+      twoBodyProcesses = T
+      threeBodyProcesses = T
+/
+
+! file: ./collisions/threeBodyReactions/masterThreeBody.f90
+&master_3body
+!
+/
+
+! file: ./numerics/random.f90
+&initRandom
+      SEED=45678                ! Seed for the random number
+/
+
+! file: ./collisions/twoBodyReactions/twoBodyStatistics.f90
+&ColStat
+      flag_varirate = T
+      varirate_format = 3
+/
+
+! file: ./analysis/InABoxAnalysis.f90
+&InABoxAnalysis
+      enable = F
+/
+
+! file: ./run/checks.f90
+&Checks
+      Do_CheckDensity = F
+      Do_CheckCoulomb = F
+/

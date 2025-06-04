@@ -1,0 +1,127 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage{fullpage}
+
+\begin{document}
+
+\title{RootTuple: A library enabling ROOT \emph{n}-tuple\\ output from FORTRAN HEP programs}
+\author{David C. Hall\\ The University of Oxford\\[0.5cm]
+http://roottuple.hepforge.org\\[0.5cm]
+Version @CPACK_PACKAGE_VERSION@}
+\date{}
+\maketitle
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+\label{sec:intro}
+There are two ways in which you might use the RootTuple library. The first is as an end user, in which case you can simply follow the instructions in \textsection\ref{sec:install}. The second is as a developer who wants to use the FORTRAN subroutines that it supplies. In this case, I give additional information about the library in the other sections.
+
+RootTuple consists of a C++ class (which handles the ROOT output) and a Fortran/C++ interface. The interface contains a wrapper which allows its C++ functions to be used as FORTRAN subroutines (see \textsection\ref{sec:routines}), and a global pointer to an instance of the C++ class.
+
+\section{Installation}
+\label{sec:install}
+Interfacing FORTRAN to C/C++ is filled with caveats, and for this reason we use the CMake build system\footnote{CMake is available at http://www.cmake.org/} to optimise the portability of the code. This version of RootTuple requires CMake-@CMAKE_MINIMUM_VERSION_REQUIRED@ or higher. Note that RootTuple may fail at runtime when using some of the more obscure FORTRAN compilers if they do not follow the standard convention for passing character arrays as arguments.
+
+In order to output the \emph{n}-tuples, we also require that the ROOT data analysis framework is installed\footnote{ROOT is available at http://root.cern.ch/drupal/}. We recommend using ROOT-5.26 or higher. The ROOT setup script must be sourced before the installation of RootTuple.
+
+\begin{enumerate}
+    \item Download source tarball and extract:\begin{verbatim}
+wget http://www.hepforge.org/archive/roottuple/RootTuple-@CPACK_PACKAGE_VERSION@.tar.gz
+tar -xzvf RootTuple-@CPACK_PACKAGE_VERSION@.tar.gz\end{verbatim}
+    \item Build in a separate binary directory:\begin{verbatim}
+mkdir build
+cd build
+cmake -DCMAKE_INSTALL_PREFIX=<prefix> ../RootTuple-@CPACK_PACKAGE_VERSION@
+make\end{verbatim}
+    \item Install to the \verb|<prefix>| directory:\begin{verbatim}
+make install\end{verbatim}
+    \item The \verb|build| directory is no longer required and can be deleted if desired.
+\end{enumerate}
+
+\subsection{What if I don't have CMake-@CMAKE_MINIMUM_VERSION_REQUIRED@ installed?}
+Firstly, I would recommend installing CMake since it is more portable and allows the source, binary and installation files to be separated easily. It also creates this documentation file if you have \LaTeX~installed, and a \verb|RootTuple-config| file to make linking easier.
+
+However, if for some reason you are not able to install CMake, I have also included a \verb|Makefile|. Before this can be used, the file \verb|external/FC_namemangling.h| must be copied into the \verb|src| directory and edited as necessary (I believe the example should work for the \verb|gfortran|, \verb|g77| and \verb|ifort| compilers, but I am not giving a guarantee).
+
+\section{Use within FORTRAN HEP programs}
+\label{sec:usage}
+\subsection{Basic usage}
+The minimal use of the subroutines to output a ROOT \emph{n}-tuple is (see \textsection\ref{sec:routines} for subroutine descriptions):
+\begin{enumerate}
+    \item Use \verb|ROOTINIT| during initialisation
+    \item For each event:
+    \begin{enumerate}
+        \item Use \verb|ROOTADDPARTICLE| on each final state particle
+        \item Use \verb|ROOTADDEVENT|
+    \end{enumerate}
+    \item Use \verb|ROOTCLOSE| during exit
+\end{enumerate}
+
+When building your program you must link to the RootTuple library, the location of which will be supplied by the end user. Since new subroutines will be called from the program, compilation will fail if the RootTuple library is not linked. For this reason, a file \verb|dummyroot.f| containing dummy routines has been included in the RootTuple source code. This should be built in the case when the RootTuple library has not been linked to.
+
+The linker must also be able to find the ROOT libraries themselves. The easiest way to do this is to source the ROOT setup script, which should set the environment variables correctly.
+
+At runtime, the end user must add the location of the RootTuple library to their \verb|LD_LIBRARY_PATH| (\verb|DYLD_LIBRARY_PATH| for MacOS). The same is also true for the ROOT libraries (again it is easiest to source the ROOT setup script.)
+
+A \verb|RootTuple-config| file is also installed in the \verb|bin| directory when RootTuple is installed using CMake. This can be used to make linking easier, since it includes information about both the RootTuple and ROOT installations used during its build.
+
+\subsection{Advanced usage}
+Some additional subroutines are provided to give greater control over the output files. For details, please see \textsection\ref{sec:routines}.
+\begin{itemize}
+    \item The \verb|ROOTADDxxxxx| subroutines allow the developer to add custom variables to the output file. Supported FORTRAN data types are \verb|DOUBLE PRECISION|, \verb|REAL|, \verb|INTEGER| and \verb|LOGICAL| which correspond to the \verb|double|, \verb|float|, \verb|int| and \verb|bool| C++ data types, respectively. Note that these variables must be set once per event, and before the \verb|ROOTADDEVENT| subroutine is called.
+\end{itemize}
+
+\section{List of FORTRAN subroutines provided}
+\label{sec:routines}
+\subsection{Basic subroutines}
+\begin{verbatim}
+    SUBROUTINE ROOTINIT(FILENAME)
+    CHARACTER*n FILENAME\end{verbatim}
+This subroutine opens a new ROOT file with name equal to the string \verb|FILENAME|. If \verb|FILENAME| does not end in \verb|.root| this will be appended automatically. The length of the string \verb|n| is set within the FORTRAN code, and any trailing whitespace will be removed.
+
+\begin{verbatim}
+    SUBROUTINE ROOTCLOSE\end{verbatim}
+This subroutine closes the ROOT file.
+
+\begin{verbatim}
+    SUBROUTINE ROOTADDPARTICLE(CODE,PX,PY,PZ,E)
+    INTEGER CODE
+    DOUBLE PRECISION PX,PY,PZ,E\end{verbatim}
+This subroutine adds a particle to the event. \verb|CODE| is an integer used to identify the particle, according to the PDG Monte Carlo particle numbering scheme. \verb|(PX,PY,PZ,E)| is the four-momentum of the particle.
+
+\begin{verbatim}
+    SUBROUTINE ROOTADDEVENT(WGT)
+    DOUBLE PRECISION WGT\end{verbatim}
+This subroutine adds an event to the \emph{n}-tuple with an event weight of \verb|WGT|. This subroutine must be used after all the particles have been added to the event using \verb|ROOTADDPARTICLE|.
+
+\subsection{Advanced subroutines}
+\begin{verbatim}
+    SUBROUTINE ROOTADDDOUBLE(VAL,BRANCH)
+    DOUBLE PRECISION VAL
+    CHARACTER*n BRANCH\end{verbatim}
+This subroutine adds a double precision variable to the event file, with name \verb|BRANCH| and value \verb|VAL|. The length of the string \verb|n| is set within the FORTRAN code, and any trailing whitespace will be removed.
+
+\begin{verbatim}
+    SUBROUTINE ROOTADDFLOAT(VAL,BRANCH)
+    REAL VAL
+    CHARACTER*n BRANCH\end{verbatim}
+This subroutine adds a single precision variable to the event file, with name \verb|BRANCH| and value \verb|VAL|. The length of the string \verb|n| is set within the FORTRAN code, and any trailing whitespace will be removed.
+
+\begin{verbatim}
+    SUBROUTINE ROOTADDINT(VAL,BRANCH)
+    INTEGER VAL
+    CHARACTER*n BRANCH\end{verbatim}
+This subroutine adds an integer variable to the event file, with name \verb|BRANCH| and value \verb|VAL|. The length of the string \verb|n| is set within the FORTRAN code, and any trailing whitespace will be removed.
+
+\begin{verbatim}
+    SUBROUTINE ROOTADDBOOL(VAL,BRANCH)
+    LOGICAL VAL
+    CHARACTER*n BRANCH\end{verbatim}
+This subroutine adds a boolean variable to the event file, with name \verb|BRANCH| and value \verb|VAL|. The length of the string \verb|n| is set within the FORTRAN code, and any trailing whitespace will be removed.
+
+\begin{verbatim}
+    SUBROUTINE ROOTWRITE\end{verbatim}
+This subroutine will create a new key in the TTree (see ROOT documentation for more information). This is not required to write the data to disk.
+
+\end{document}

@@ -1,0 +1,57 @@
+!--------------------------------------------------------- -*- fortran -*- ----
+! sample jobcard for p+nucleus collision for SSM
+! cf. GiBUU-jobcard 300_pA_SMM.job
+!------------------------------------------------------------------------------
+
+
+!***************************************************
+! General Input
+!***************************************************
+$inputGeneral
+      TheModel=2                ! 1=Phase space coalescence / 2=SMM
+      SubEvents=1               ! number of subsequent runs
+      NumEnsemples=200          ! number of ensemples
+      RealParticles=300         ! max. number of particles per Events
+      PathToBUUInput='/home/gallmei/GiBUU/workingCode/testRun/testSMM/'
+      BUU_DataFile='auauSMM100fmc.dat' ! BUU Data File
+      Get_Hyp=.false.           ! formation of hypernuclei via coalescence
+      Get_GiBUUvec=.true.
+$end
+
+!***************************************************
+! Input for SMM model
+!***************************************************
+
+$inputSMM
+      SMM_Seed=12345,           !initialize RG
+      EventType=2               !=1:X+X reactions / =2: p+X reactions
+      E_Bind_Input=10.795       !Precise value of the binding energy (MeV/A)
+      SMM_Flag=1                !=1: Full SMM / =0: Only evaporation
+      SMM_Events=10             !Number of events for SMM statistical code
+      CorrectExc=.true.         !Correction due to non-energy conservation
+      Delta_Exc=0.86            !Value for correction
+      MaxNumSources=10
+      SourceInfo='Source100.dat'
+      PathToSMMInput='/home/gallmei/GiBUU/workingCode/testRun/testSMM/'
+$end
+
+$inputGrid
+      gridSize(1)=40.           ! Size of density grid in x-direction (fm)
+      gridSize(2)=40.           ! Size of density grid in y-direction (fm)
+      gridSize(3)=40.           ! Size of density grid in z-direction (fm)
+      gridPoints(1)=36          ! Number of grid points in x-direction
+      gridPoints(2)=36          ! Number of grid points in y-direction
+      gridPoints(3)=40          ! Number of grid points in z-direction
+
+$end
+
+!***************************************************
+! Input for analysis :
+! Default: u0_Proj=1., uz_Proj=0., SpectCut=0.
+!***************************************************
+$inputAnalysis
+      u0_Proj=1.10146           !Gamma-Factor of Projectile in CMS
+      uz_Proj=0.46176           !Gamma*Beta-Factor of Projectile in CMS
+      SpectCut=0.5              !Cut for selecting only spectator matter
+      ImpactParameter_bin=0.25  !impact parameter bin in units of [fm]
+$end

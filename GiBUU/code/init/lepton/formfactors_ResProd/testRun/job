@@ -1,0 +1,20 @@
+$input_FF_ResProd
+FF_ResProd=0  !0: MAID's helicity amplitudes (Luis' helicity expressions)
+              ! * 1: fit of Lalakulich (PRD 74, 014009 (2006))
+              ! * 2: MAID's helicity amplitudes (Lalakulich's helicity expressions)
+$end
+
+! file: code/inputOutput/input.f90
+&input
+  numEnsembles = 100,     ! number of ensembles
+  eventtype    = 3,     ! photon+A
+  delta_T      = 0.2,   ! time step size
+  numTimeSteps = 0,     ! number of time steps for a proton target
+!  numTimeSteps = 200        ! number of time steps for a nuclear target
+  num_energies = 30,     ! Number of different energies
+  num_runs_sameEnergy = 2500,       ! Number of runs with the same energy
+ length_perturbative = 50, ! Proton
+!   length_perturbative = 1000     ! Ca
+  ! length_perturbative = 3000   ! Nb
+  path_To_Input = "~/GiBUU/buuinput",   ! path to input directory
+/
