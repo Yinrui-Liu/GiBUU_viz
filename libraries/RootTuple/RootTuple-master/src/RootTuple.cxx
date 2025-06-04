@@ -71,9 +71,10 @@ void RootTuple::AddEvent()
 	    (int)m_E.size()  != (int)m_barcode.size() ||
 	    (int)m_x.size()  != (int)m_barcode.size() ||
 	    (int)m_y.size()  != (int)m_barcode.size() ||
-	    (int)m_z.size()  != (int)m_barcode.size())
+      (int)m_z.size()  != (int)m_barcode.size() ||
+      (int)m_ID.size() != (int)m_barcode.size())
 #else
-        if ((int)m_Px.size() != (int)m_barcode.size() ||
+  if ((int)m_Px.size() != (int)m_barcode.size() ||
 	    (int)m_Py.size() != (int)m_barcode.size() ||
 	    (int)m_Pz.size() != (int)m_barcode.size() ||
 	    (int)m_E.size()  != (int)m_barcode.size())
@@ -105,17 +106,29 @@ void RootTuple::Close()
 		std::cout << "RootTuple:: Error: No ROOT file was opened" << std::endl;
 }//Close
 
-void RootTuple::AddParticle(int barcode, double px, double py, double pz, double e, double x, double y, double z)
+void RootTuple::AddParticle(
+    int barcode, int ID, int charge,
+    int UID, int history,
+    double px, double py, double pz,
+    double e, double x, double y, double z,
+    int event0, int event1, int first_event)
 {
-	m_barcode.push_back(barcode);
-	m_Px.push_back(px);
-	m_Py.push_back(py);
-	m_Pz.push_back(pz);
-	m_E.push_back(e);
+  m_barcode.push_back(barcode);
+  m_Px.push_back(px);
+  m_Py.push_back(py);
+  m_Pz.push_back(pz);
+  m_E.push_back(e);
+  m_ID.push_back(ID);
+  m_charge.push_back(charge);
+  m_UID.push_back(UID);
+  m_history.push_back(history);
+  m_event0.push_back(event0);
+  m_event1.push_back(event1);
+  m_first_event.push_back(first_event);
 #if WITHPOS
-        m_x.push_back(x);
-        m_y.push_back(y);
-        m_z.push_back(z);
+  m_x.push_back(x);
+  m_y.push_back(y);
+  m_z.push_back(z);
 #endif
 
 }//AddParticle
@@ -163,16 +176,23 @@ void RootTuple::SetBoolBranch(std::string branchname, bool *ptr)
 void RootTuple::DeclareBranches()
 {
 	// Declare required branches
-	m_tree->Branch("weight",    &m_weight);
-	m_tree->Branch("barcode",   &m_barcode);
-	m_tree->Branch("Px",        &m_Px);
-	m_tree->Branch("Py",        &m_Py);
-	m_tree->Branch("Pz",        &m_Pz);
-	m_tree->Branch("E",         &m_E);
+  m_tree->Branch("weight",    &m_weight);
+  m_tree->Branch("barcode",   &m_barcode);
+  m_tree->Branch("Px",        &m_Px);
+  m_tree->Branch("Py",        &m_Py);
+  m_tree->Branch("Pz",        &m_Pz);
+  m_tree->Branch("E",         &m_E);
+  m_tree->Branch("ID",        &m_ID);
+  m_tree->Branch("charge",    &m_charge);
+  m_tree->Branch("UID",       &m_UID);
+  m_tree->Branch("history",   &m_history);
+  m_tree->Branch("event0",    &m_event0);
+  m_tree->Branch("event1",    &m_event1);
+  m_tree->Branch("first_event",&m_first_event);
 #if WITHPOS
-        m_tree->Branch("x",         &m_x);
-        m_tree->Branch("y",         &m_y);
-        m_tree->Branch("z",         &m_z);
+  m_tree->Branch("x",         &m_x);
+  m_tree->Branch("y",         &m_y);
+  m_tree->Branch("z",         &m_z);
 #endif
 }//DeclareBranches
 
@@ -184,14 +204,21 @@ void RootTuple::FillBranches()
 
 void RootTuple::ClearVectors()
 {
-	m_barcode.clear();
-	m_Px.clear();
-	m_Py.clear();
-	m_Pz.clear();
-	m_E.clear();
+  m_barcode.clear();
+  m_Px.clear();
+  m_Py.clear();
+  m_Pz.clear();
+  m_E.clear();
+  m_ID.clear();
+  m_charge.clear();
+  m_UID.clear();
+  m_history.clear();
+  m_event0.clear();
+  m_event1.clear();
+  m_first_event.clear();
 #if WITHPOS
-        m_x.clear();
-        m_y.clear();
-        m_z.clear();
+  m_x.clear();
+  m_y.clear();
+  m_z.clear();
 #endif
 }//ClearVectors

@@ -4,7 +4,7 @@ wget --content-disposition https://gibuu.hepforge.org/downloads?f=buuinput2025.t
 copy all contents to buuinput/
 ### Building
 cd GiBUU
-make buildRootTuple
+make buildRootTuple_POS
 make withROOT=1
 ### Running
 find a quiet place

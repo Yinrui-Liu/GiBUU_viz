@@ -247,9 +247,10 @@
 
 ! file: code/analysis/EventOutputAnalysis.f90
 &EventOutput
+     ! WriteRealParticles = T
      WritePerturbativeParticles = T  ! if you want that output
      Interval=1
-     EventFormat=1 ! 1=LesHouches(default), 2=Oscar, 3=Shanghai, 4=ROOT
+     EventFormat=4 ! 1=LesHouches(default), 2=Oscar, 3=Shanghai, 4=ROOT
 /
 
 
