@@ -1,0 +1,41 @@
+{
+  "model": {
+    "embedding": {
+      "num_embeddings": 4096,
+      "embedding_dim": 16,
+      "scale_grad_by_freq": true
+    },
+    "particle_encoder": {
+      "in_features": 7,
+      "hidden_layers": 1,
+      "hidden_features": 512,
+      "out_features": 16
+    },
+    "particle_decoder": {
+      "in_features": 16,
+      "out_features": 7,
+      "num_classes": 2048
+    },
+    "transformer": {
+      "layer": {
+        "nhead": 4,
+        "d_model": 16,
+        "batch_first": true
+      },
+      "decoder": {
+        "num_layers": 4
+      }
+    }
+  },
+  "trainer": {
+    "batch_size": 32,
+    "max_seq_len": 1000,
+    "max_epochs": 1000,
+    "every_n_epochs": 1,
+    "log_every_n_steps": 10
+  },
+  "lr": 1e-4,
+  "weight_decay": 1e-5,
+  "type_loss_weight": 1.0,
+  "feat_loss_weight": 1.0
+}
