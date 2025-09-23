@@ -5,6 +5,9 @@ Data processing utilities for GiBUU particle sequences.
 import numpy as np
 import h5py
 import torch
+import os
+import uproot
+from typing import Sequence
 from torch.utils.data import Dataset, DataLoader
 from .constants import EOS_STEP_TOKEN, EOS_TOKEN, PAD_TOKEN, FEATS_MEAN, FEATS_SIGMA
 from .utils import calculate_feature_statistics, load_feature_statistics
@@ -14,7 +17,7 @@ def extract_particle_sequences(h5_file_path, gr_key="perturbative"):
     """
     Extracts the full sequence of particles for each event, flattened as a list of tokens. 
     Sort by time_step, then by E (descending) within each time step.
-    Each token: [time_step, gibuuID, charge, x, y, z, E, Px, Py, Pz]
+    Each token: [time_step, gibuuID, charge, x, y, z, m, E, Px, Py, Pz]
     Returns: List of lists (one per event), each inner list is the sequence of tokens.
     """
     sequences_per_event = []
@@ -45,6 +48,7 @@ def extract_particle_sequences(h5_file_path, gr_key="perturbative"):
                         float(p['x']),
                         float(p['y']),
                         float(p['z']),
+                        float(p['m']),
                         float(p['E']),
                         float(p['Px']),
                         float(p['Py']),
@@ -96,7 +100,7 @@ def prepare_sequence_for_training(raw_sequences, max_seq_len=6000, recursive_tru
     Parameters:
     -----------
     raw_sequences: List of lists
-        Each inner list is a sequence of particle tokens: [ts, gibuuID, chg, x, y, z, E, Px, Py, Pz]
+        Each inner list is a sequence of particle tokens: [ts, gibuuID, chg, x, y, z, m, E, Px, Py, Pz]
     max_seq_len: int
         Maximum sequence length after padding
     recursive_truncate: bool
@@ -137,7 +141,7 @@ def prepare_sequence_for_training(raw_sequences, max_seq_len=6000, recursive_tru
             current_time_step = None
             
             for token in sequence:
-                ts, gibuu_id, charge, x, y, z, E, Px, Py, Pz = token
+                ts, gibuu_id, charge, x, y, z, m, E, Px, Py, Pz = token
                 
                 # Check if we've moved to a new time step
                 if current_time_step is not None and ts != current_time_step:
@@ -150,7 +154,7 @@ def prepare_sequence_for_training(raw_sequences, max_seq_len=6000, recursive_tru
                 encoded_id = encode_id(gibuu_id, charge)
                 
                 # Create token: [encoded_id, x, y, z, E, Px, Py, Pz]
-                processed_token = [encoded_id, x, y, z, E, Px, Py, Pz]
+                processed_token = [encoded_id, x, y, z, E-m, Px, Py, Pz]
                 processed_seq.append(processed_token)
             
             # Insert EOS_STEP_TOKEN after the last time step
@@ -207,7 +211,7 @@ def prepare_sequence_for_training(raw_sequences, max_seq_len=6000, recursive_tru
         seq_feats = []
         for token in seq:
             encoded_id = token[0]
-            features = token[1:]  # x, y, z, E, Px, Py, Pz
+            features = token[1:]  # x, y, z, KE, Px, Py, Pz
             # Convert to numpy arrays for normalization
             features = np.array(features)
             feats_mean = np.array(FEATS_MEAN)
@@ -287,3 +291,115 @@ def create_dataloaders(seqdata, batch_size=32, max_seq_len=6000, train_split=0.8
     )
     
     return train_loader, val_loader
+
+
+def build_gibuu_h5_from_root(
+    data_path: str,
+    out_path: str,
+    timesteps: Sequence[int],
+    group_key: str = "perturbative",
+    filename_pattern: str = "EventOutput.Pert.00000{ttt:03d}.root",
+) -> None:
+    """
+    Read GiBUU ROOT files across timesteps and write an HDF5 file compatible 
+    with GiBUU_Transformer extract_particle_sequences().
+    
+    Output HDF5 schema:
+      - a single VLEN dataset at f[group_key] with length n_events
+      - each element is a structured array with fields:
+        ('time_step','i4'), ('gibuuID','i4'), ('charge','i4'),
+        ('x','f4'), ('y','f4'), ('z','f4'), ('m','f4'), ('E','f4'),
+        ('Px','f4'), ('Py','f4'), ('Pz','f4')
+    
+    Parameters:
+    - data_path: directory containing ROOT files
+    - out_path: output HDF5 path (e.g., "GiBUU_FSI_particles.h5")
+    - timesteps: iterable of timestep integers (e.g., range(1, 203))
+    - group_key: HDF5 key (default "perturbative") expected by downstream code
+    - filename_pattern: template for ROOT filenames; default matches your notebook
+    """
+    # 1) Build weight-based event remapping (eID_map) to fix event order across timesteps
+    weight_list = []
+    for ttt in timesteps:
+        file_name = os.path.join(data_path, filename_pattern.format(ttt=ttt))
+        with uproot.open(file_name) as f:
+            tree = f["RootTuple"]
+            weight_list.append(tree["weight"].array(library="np"))
+    eWID_arr = np.asarray(weight_list)  # shape: (n_steps, n_events)
+    if eWID_arr.ndim != 2:
+        raise RuntimeError(f"Unexpected weight array shape: {eWID_arr.shape}")
+    n_steps, n_events = eWID_arr.shape
+    if True: # TB checked if the WID is still necessary anymore
+        ref_eWID = eWID_arr[0]
+        eID_map = np.empty_like(eWID_arr, dtype=int)
+        for i in range(n_steps):
+            ref_sort = np.argsort(ref_eWID)
+            cur_sort = np.argsort(eWID_arr[i])
+            inverse_map = np.empty_like(ref_sort)
+            inverse_map[ref_sort] = cur_sort
+            eID_map[i] = inverse_map
+            if (eWID_arr[i][inverse_map] != ref_eWID).any():
+                print(f"[Warning] weight mismatch at step index {i} (t={timesteps[i]})")
+
+    # 3) Read all steps, collect per-event structured arrays
+    dtype_particle = np.dtype([
+        ('time_step', 'i4'),
+        ('gibuuID',   'i4'),
+        ('charge',    'i4'), #('PDG', 'i4'),
+        ('x',         'f4'), ('y',   'f4'), ('z', 'f4'),
+        ('m',         'f4'), ('E',   'f4'),
+        ('Px',        'f4'), ('Py',  'f4'), ('Pz', 'f4'),
+    ])
+    per_event_records = [[] for _ in range(n_events)]
+
+    print("Start looping files")
+    for step_idx, ttt in enumerate(timesteps):
+        file_name = os.path.join(data_path, filename_pattern.format(ttt=ttt))
+        with uproot.open(file_name) as f:
+            tree = f["RootTuple"]
+            x_all  = tree["x"].array(library="np")
+            y_all  = tree["y"].array(library="np")
+            z_all  = tree["z"].array(library="np")
+            px_all = tree["Px"].array(library="np")
+            py_all = tree["Py"].array(library="np")
+            pz_all = tree["Pz"].array(library="np")
+            pdg_all = tree["pdg_id"].array(library="np")
+            gibuuID_all = tree["gibuu_id"].array(library="np")
+            charge_all = tree["charge"].array(library="np")
+            E_all = tree["E"].array(library="np")
+            m_all = tree["mass"].array(library="np")
+
+        # Remap events using eID_map to keep the same physical event across timesteps
+        for event_idx in range(n_events):
+            eid = event_idx#eID_map[step_idx, event_idx]
+            x  = x_all[eid]; y  = y_all[eid]; z  = z_all[eid]
+            px = px_all[eid]; py = py_all[eid]; pz = pz_all[eid]
+            E  = E_all[eid]; m = m_all[eid]
+            pdg = pdg_all[eid]
+            gibuu_id = pdg_all[eid]
+            charge = charge_all[eid]
+
+            n_particles = len(pdg_all[eid])
+            for i in range(n_particles):
+                per_event_records[event_idx].append((
+                    int(ttt),
+                    int(gibuu_id[i]), int(charge[i]), #int(pdg[i]),
+                    float(x[i]), float(y[i]), float(z[i]),
+                    float(m[i]), float(E[i]),
+                    float(px[i]), float(py[i]), float(pz[i]),
+                ))
+
+        if (step_idx + 1) % 10 == 0:
+            print(f"### Loaded step {step_idx+1}/{n_steps}")
+
+    # 4) Write HDF5: VLEN structured dataset at key `group_key`
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    vlen_dtype = h5py.vlen_dtype(dtype_particle)
+    with h5py.File(out_path, "w") as f:
+        dset = f.create_dataset(group_key, shape=(n_events,), dtype=vlen_dtype)
+        for i, recs in enumerate(per_event_records):
+            if len(recs) == 0:
+                dset[i] = np.array([], dtype=dtype_particle)
+            else:
+                dset[i] = np.array(recs, dtype=dtype_particle)
+    print(f"[Saved] {out_path} with key '{group_key}' and {n_events} events")

@@ -10,16 +10,16 @@ def calculate_feature_statistics(raw_sequences, save_path=None):
     Parameters:
     -----------
     raw_sequences: List of lists
-        Each inner list is a sequence of particle tokens: [ts, gibuuID, chg, x, y, z, E, Px, Py, Pz]
+        Each inner list is a sequence of particle tokens: [ts, gibuuID, chg, x, y, z, m, E, Px, Py, Pz]
     save_path: str, optional
         Path to save the calculated statistics as JSON file
         
     Returns:
     --------
     feats_mean: list
-        Mean values for [x, y, z, E, Px, Py, Pz]
+        Mean values for [x, y, z, KE, Px, Py, Pz] where KE = E - m
     feats_sigma: list
-        Standard deviation values for [x, y, z, E, Px, Py, Pz]
+        Standard deviation values for [x, y, z, KE, Px, Py, Pz]
     """
     import numpy as np
     import json
@@ -28,9 +28,11 @@ def calculate_feature_statistics(raw_sequences, save_path=None):
     
     for sequence in raw_sequences:
         for token in sequence:
-            # token = [ts, gibuuID, chg, x, y, z, E, Px, Py, Pz]
-            # Extract features: [x, y, z, E, Px, Py, Pz]
-            features = token[3:10]  # Skip ts, gibuuID, chg
+            # token = [ts, gibuuID, chg, x, y, z, m, E, Px, Py, Pz]
+            # Extract features: [x, y, z, KE, Px, Py, Pz] where KE = E - m
+            x, y, z, m, E, Px, Py, Pz = token[3:11]  # Skip ts, gibuuID, chg
+            KE = E - m  # Calculate kinetic energy
+            features = [x, y, z, KE, Px, Py, Pz]
             all_features.append(features)
     
     # Convert to numpy array for easier computation
@@ -69,9 +71,9 @@ def load_feature_statistics(load_path):
     Returns:
     --------
     feats_mean: list
-        Mean values for [x, y, z, E, Px, Py, Pz]
+        Mean values for [x, y, z, KE, Px, Py, Pz] where KE = E - m
     feats_sigma: list
-        Standard deviation values for [x, y, z, E, Px, Py, Pz]
+        Standard deviation values for [x, y, z, KE, Px, Py, Pz]
     """
     import json
     
@@ -157,8 +159,8 @@ def load_sequence_data(load_path):
     import torch
     import numpy as np
     
-    # Load the data
-    data = np.load(load_path)
+    # Load the data with allow_pickle=True to handle None values
+    data = np.load(load_path, allow_pickle=True)
     
     # Convert back to tensors
     seqdata = {
@@ -168,8 +170,12 @@ def load_sequence_data(load_path):
     }
     
     # Add causal_mask if it exists
-    if 'causal_mask' in data and data['causal_mask'] is not None:
-        seqdata['causal_mask'] = torch.tensor(data['causal_mask'], dtype=torch.bool)
+    if 'causal_mask' in data:
+        # Check if causal_mask is an object array (contains None) or is None
+        if data['causal_mask'] is None or data['causal_mask'].dtype == np.object_:
+            seqdata['causal_mask'] = None
+        else:
+            seqdata['causal_mask'] = torch.tensor(data['causal_mask'], dtype=torch.bool)
     else:
         seqdata['causal_mask'] = None
     
