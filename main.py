@@ -10,8 +10,14 @@ This script provides a command-line interface for:
 5. Visualizing results
 
 Usage:
-    # Prepare data (one-time)
+    # Prepare data from H5 file (one-time)
     python main.py --mode prep --data_path /exp/dune/data/users/yinrui/GiBUU/GPTdata/GiBUU_FSI_particles.h5
+
+    # Prepare data from ROOT files (automatically converts to H5)
+    python main.py --mode prep --data_path /path/to/root/files/directory
+
+    # Force conversion of ROOT files even if H5 file exists
+    python main.py --mode prep --data_path /path/to/root/files/directory --force_convert
 
     # Train a new model
     python main.py --mode train --config config.json --data_path /exp/dune/data/users/yinrui/GiBUU/GPTdata/GiBUU_FSI_particles.h5
@@ -46,7 +52,7 @@ from gibuu_transformer import (
     save_particles_gif,
     extract_visualization_lists_from_output_sequence
 )
-from gibuu_transformer.utils import save_sequence_data, load_sequence_data
+from gibuu_transformer.utils import save_sequence_data, load_sequence_data, detect_data_format, convert_root_to_h5
 from gibuu_transformer.constants import EOS_STEP_TOKEN, EOS_TOKEN, GIBUU_CHARGE_TO_PDG
 from gibuu_transformer.data_processing import create_dataloaders, ParticleSequenceDataset
 from gibuu_transformer.visualization import load_and_plot_loss_curves
@@ -84,9 +90,37 @@ def prep_mode(args):
     # Load configuration
     cfg = load_config(args.config)
     
+    # Detect data format and handle ROOT to H5 conversion if needed
+    format_type, h5_file_path = detect_data_format(args.data_path)
+    
+    if format_type == 'unknown':
+        raise ValueError(f"Could not detect data format in {args.data_path}. "
+                        "Expected either H5 files or ROOT files with pattern 'EventOutput.Pert.00000*.root'")
+    
+    if format_type == 'root':
+        print(f"Detected ROOT files in {args.data_path}")
+        print(f"Converting ROOT files to H5 format: {h5_file_path}")
+        
+        # Check if H5 file already exists
+        if Path(h5_file_path).exists():
+            print(f"H5 file already exists: {h5_file_path}")
+            print("Skipping conversion. Use --force_convert to overwrite.")
+            if not getattr(args, 'force_convert', False):
+                data_path = h5_file_path
+            else:
+                print("Force converting ROOT files to H5...")
+                convert_root_to_h5(args.data_path, h5_file_path)
+                data_path = h5_file_path
+        else:
+            convert_root_to_h5(args.data_path, h5_file_path)
+            data_path = h5_file_path
+    else:
+        print(f"Detected H5 file: {h5_file_path}")
+        data_path = h5_file_path
+    
     # Load and process data
-    print(f"Loading data from {args.data_path}...")
-    data = extract_particle_sequences(args.data_path)
+    print(f"Loading data from {data_path}...")
+    data = extract_particle_sequences(data_path)
     print(f"Loaded {len(data)} events")
     
     # Prepare sequences for training
@@ -369,9 +403,11 @@ def main():
                        required=True, help="Mode to run")
     
     # Data arguments
-    parser.add_argument("--data_path", type=str, help="Path to H5 data file")
+    parser.add_argument("--data_path", type=str, help="Path to H5 data file or directory containing ROOT files")
     parser.add_argument("--checkpoint_path", type=str, help="Path to model checkpoint")
     parser.add_argument("--config", type=str, default="config.json", help="Path to configuration JSON file")
+    parser.add_argument("--force_convert", action="store_true", 
+                       help="Force conversion of ROOT files to H5 even if H5 file already exists")
     
     # Training arguments
     parser.add_argument("--log_dir", type=str, default="lightning_logs", 

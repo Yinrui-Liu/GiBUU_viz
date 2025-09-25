@@ -2,6 +2,8 @@
 Utility functions for GiBUU Transformer.
 """
 
+from pathlib import Path
+
 
 def calculate_feature_statistics(raw_sequences, save_path=None):
     """
@@ -192,3 +194,86 @@ def load_sequence_data(load_path):
         print(f"Warning: Metadata file not found at {metadata_path}")
     
     return seqdata
+
+
+def detect_data_format(data_path):
+    """
+    Detect whether the data_path contains H5 files or ROOT files.
+    
+    Returns:
+        tuple: (format_type, h5_file_path)
+        - format_type: 'h5' if H5 file found, 'root' if ROOT files found, 'unknown' otherwise
+        - h5_file_path: path to H5 file if found, or suggested path for conversion
+    """
+    data_path = Path(data_path)
+    
+    # Check if it's a direct H5 file
+    if data_path.is_file() and data_path.suffix.lower() in ['.h5', '.hdf5']:
+        return 'h5', str(data_path)
+    
+    # Check if it's a directory
+    if data_path.is_dir():
+        # Look for H5 files in the directory
+        h5_files = list(data_path.glob("*.h5")) + list(data_path.glob("*.hdf5"))
+        if h5_files:
+            return 'h5', str(h5_files[0])
+        
+        # Look for ROOT files with the expected pattern
+        root_files = list(data_path.glob("EventOutput.Pert.00000*.root"))
+        if root_files:
+            # Generate suggested H5 output path
+            h5_output = data_path / "GiBUU_FSI_particles.h5"
+            return 'root', str(h5_output)
+    
+    return 'unknown', None
+
+
+def convert_root_to_h5(root_data_path, h5_output_path):
+    """
+    Convert ROOT files to H5 format using build_gibuu_h5_from_root.
+    
+    Parameters:
+    -----------
+    root_data_path: str or Path
+        Directory containing ROOT files
+    h5_output_path: str or Path
+        Output H5 file path
+    """
+    from .data_processing import build_gibuu_h5_from_root
+    
+    root_data_path = Path(root_data_path)
+    
+    # Find all ROOT files to determine the timestep range
+    root_files = sorted(list(root_data_path.glob("EventOutput.Pert.00000*.root")))
+    if not root_files:
+        raise FileNotFoundError(f"No ROOT files found in {root_data_path}")
+    
+    # Extract timesteps from filenames
+    timesteps = []
+    for root_file in root_files:
+        # Extract timestep from filename like "EventOutput.Pert.00000123.root"
+        filename = root_file.name
+        if "EventOutput.Pert.00000" in filename and filename.endswith(".root"):
+            timestep_str = filename.replace("EventOutput.Pert.00000", "").replace(".root", "")
+            try:
+                timestep = int(timestep_str)
+                timesteps.append(timestep)
+            except ValueError:
+                print(f"Warning: Could not parse timestep from {filename}")
+    
+    if not timesteps:
+        raise ValueError("No valid timesteps found in ROOT filenames")
+    
+    timesteps = sorted(timesteps)
+    print(f"Found {len(timesteps)} timesteps: {timesteps[0]} to {timesteps[-1]}")
+    
+    # Convert ROOT files to H5
+    build_gibuu_h5_from_root(
+        data_path=str(root_data_path),
+        out_path=h5_output_path,
+        timesteps=timesteps,
+        group_key="perturbative",
+        filename_pattern="EventOutput.Pert.00000{ttt:03d}.root"
+    )
+    
+    print(f"Successfully converted ROOT files to H5: {h5_output_path}")
