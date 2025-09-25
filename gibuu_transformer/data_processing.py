@@ -376,7 +376,7 @@ def build_gibuu_h5_from_root(
             px = px_all[eid]; py = py_all[eid]; pz = pz_all[eid]
             E  = E_all[eid]; m = m_all[eid]
             pdg = pdg_all[eid]
-            gibuu_id = pdg_all[eid]
+            gibuu_id = gibuuID_all[eid]
             charge = charge_all[eid]
 
             n_particles = len(pdg_all[eid])
