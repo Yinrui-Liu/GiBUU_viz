@@ -8,7 +8,7 @@ import torch
 import os
 import uproot
 from typing import Sequence
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, IterableDataset
 from .constants import EOS_STEP_TOKEN, EOS_TOKEN, PAD_TOKEN, FEATS_MEAN, FEATS_SIGMA
 from .utils import calculate_feature_statistics, load_feature_statistics
 
@@ -259,37 +259,198 @@ class ParticleSequenceDataset(Dataset):
         return item
 
 
+class NPZStreamingDataset(IterableDataset):
+    """
+    Memory-efficient IterableDataset that streams items from one or more NPZ files.
+    Yields all items with a 'split' field indicating train/val assignment.
+    Uses deterministic hashing for consistent train/val split and optional shuffling.
+    """
+
+    def __init__(self, npz_file_paths, split_ratio: float = 0.8, shuffle: bool = True):
+        self.npz_file_paths = list(npz_file_paths)
+        self.split_ratio = float(split_ratio)
+        self.shuffle = shuffle
+
+    @staticmethod
+    def _get_split(file_path: str, idx: int, split_ratio: float) -> str:
+        # Stable hash independent of Python's randomized hash
+        import hashlib
+        key = f"{file_path}:{idx}".encode("utf-8")
+        h = hashlib.md5(key).hexdigest()
+        bucket = int(h[:8], 16) % 100  # 0..99
+        return "train" if bucket < int(split_ratio * 100) else "val"
+
+    def __iter__(self):
+        from time import time
+        
+        # Check if we have any files to process
+        if not self.npz_file_paths:
+            print("NPZStreamingDataset: No NPZ files provided, yielding nothing")
+            return
+        
+        # Seed per worker to change order across epochs
+        worker_info = torch.utils.data.get_worker_info()
+        base_seed = torch.initial_seed() if torch.initial_seed is not None else 0
+        rng = np.random.RandomState(base_seed % (2**32 - 1))
+        worker_id = worker_info.id if worker_info is not None else 0
+        num_workers = worker_info.num_workers if worker_info is not None else 1
+        
+        print(f"NPZStreamingDataset: Worker {worker_id}/{num_workers}, shuffle={self.shuffle}")
+        print(f"NPZStreamingDataset: Processing {len(self.npz_file_paths)} files: {self.npz_file_paths}")
+
+        for file_idx, fp in enumerate(self.npz_file_paths):
+            file_start = time()
+            print(f"NPZStreamingDataset: Loading file {file_idx+1}/{len(self.npz_file_paths)}: {fp}")
+            
+            load_start = time()
+            with np.load(fp, allow_pickle=True) as data:
+                load_time = time() - load_start
+                num_items = len(data['encoded_ids'])
+                print(f"NPZStreamingDataset: File loaded in {load_time:.2f}s, has {num_items} items")
+                
+                # Convert to tensors once (like original method)
+                tensor_start = time()
+                encoded_ids = torch.tensor(data['encoded_ids'], dtype=torch.long)
+                particle_feats = torch.tensor(data['particle_feats'], dtype=torch.float32)
+                padding_mask = torch.tensor(data['padding_mask'], dtype=torch.bool)
+                tensor_time = time() - tensor_start
+                print(f"NPZStreamingDataset: Converted to tensors in {tensor_time:.2f}s")
+                
+                indices_start = time()
+                indices = np.arange(num_items)
+                if self.shuffle:
+                    print(f"NPZStreamingDataset: Shuffling indices")
+                    rng.shuffle(indices)
+                indices_time = time() - indices_start
+                print(f"NPZStreamingDataset: Indices prepared in {indices_time:.2f}s")
+                
+                # Shard indices across workers
+                if num_workers > 1:
+                    indices = indices[worker_id::num_workers]
+                    print(f"NPZStreamingDataset: Worker {worker_id} processing {len(indices)} items")
+                
+                items_yielded = 0
+                yield_start = time()
+                for i in indices:
+                    split = self._get_split(fp, int(i), self.split_ratio)
+                    item = {
+                        'encoded_ids': encoded_ids[i],  # Just indexing, no tensor creation
+                        'particle_feats': particle_feats[i],
+                        'padding_mask': padding_mask[i],
+                        'split': split,
+                    }
+                    items_yielded += 1
+                    yield item
+                    if items_yielded % 1000 == 0:
+                        yield_time = time() - yield_start
+                        rate = items_yielded / yield_time if yield_time > 0 else 0
+                        #print(f"NPZStreamingDataset: Yielded {items_yielded}/{len(indices)} items from {fp} ({rate:.1f} items/s)")
+                        yield_start = time()  # Reset timer
+                
+                file_time = time() - file_start
+                print(f"NPZStreamingDataset: Completed {fp} in {file_time:.2f}s, yielded {items_yielded} items")
+
+
+class SplitFilterDataset(IterableDataset):
+    """
+    Wrapper that filters items from NPZStreamingDataset by split type.
+    """
+    
+    def __init__(self, base_dataset: NPZStreamingDataset, split: str):
+        assert split in ("train", "val")
+        self.base_dataset = base_dataset
+        self.split = split
+    
+    def __iter__(self):
+        from time import time
+        
+        filter_start = time()
+        items_seen = 0
+        items_yielded = 0
+        for item in self.base_dataset:
+            items_seen += 1
+            if item['split'] == self.split:
+                # Remove split field before yielding
+                del item['split']
+                items_yielded += 1
+                yield item
+                if items_yielded % 1000 == 0:
+                    filter_time = time() - filter_start
+                    rate = items_yielded / filter_time if filter_time > 0 else 0
+                    #print(f"SplitFilterDataset({self.split}): Yielded {items_yielded} items (seen {items_seen}) at {rate:.1f} items/s")
+            if items_seen % 5000 == 0:
+                filter_time = time() - filter_start
+                rate = items_seen / filter_time if filter_time > 0 else 0
+                #print(f"SplitFilterDataset({self.split}): Processed {items_seen} items at {rate:.1f} items/s")
+        
+        total_time = time() - filter_start
+        print(f"SplitFilterDataset({self.split}): Final - yielded {items_yielded} items from {items_seen} total in {total_time:.2f}s")
+
+
 def create_dataloaders(seqdata, batch_size=32, max_seq_len=6000, train_split=0.8):
     """
     Create training and validation dataloaders.
+
+    Supports two inputs:
+    - In-memory seqdata dict with tensors (existing behavior)
+    - List/tuple of NPZ file paths for streaming from disk
     """
-    # Create full dataset
+    # Case 1: list/tuple of NPZ file paths → streaming IterableDatasets
+    if isinstance(seqdata, (list, tuple)) and all(isinstance(p, str) for p in seqdata):
+        npz_files = list(seqdata)
+        print(f"create_dataloaders: Received {len(npz_files)} NPZ files: {npz_files}")
+        if len(npz_files) == 0:
+            raise ValueError("Empty NPZ file list provided to create_dataloaders")
+
+        # Single dataset loads all files once, then filter by split
+        base_dataset = NPZStreamingDataset(npz_files, split_ratio=train_split, shuffle=True)
+        train_dataset = SplitFilterDataset(base_dataset, "train")
+        val_dataset = SplitFilterDataset(base_dataset, "val")
+
+        # For IterableDataset, DataLoader shuffle has no effect; handled in-dataset.
+        # Keep workers low to reduce concurrent file loads; increase if storage can handle it.
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True
+        )
+
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=True
+        )
+        return train_loader, val_loader
+
+    # Case 2: original dict of tensors → original behavior
     full_dataset = ParticleSequenceDataset(seqdata, max_seq_len)
-    
-    # Split into train/val
+
     train_size = int(train_split * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(
         full_dataset, [train_size, val_size]
     )
-    
-    # Create dataloaders
+
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
+        train_dataset,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=4,
         pin_memory=True
     )
-    
+
     val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
+        val_dataset,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=4,
         pin_memory=True
     )
-    
+
     return train_loader, val_loader
 
 
