@@ -26,10 +26,12 @@ Usage:
     python main.py --mode train --config config.json --seqdata_path processed_seqdata.npz
 
     # Evaluate a trained model
-    python main.py --mode eval --checkpoint_path checkpoints/model.ckpt --data_path GiBUU_FSI_particles.h5
+    python main.py --mode eval --checkpoint_path checkpoints/last.ckpt --data_path GiBUU_FSI_particles.h5
+
+    python main.py --mode eval --checkpoint_path checkpoints/last.ckpt --seqdata_path processed_seqdata.npz
 
     # Generate new sequences with visualization
-    python main.py --mode generate --checkpoint_path checkpoints/model.ckpt --data_path GiBUU_FSI_particles.h5 --visualize
+    python main.py --mode generate --checkpoint_path checkpoints/last.ckpt --data_path GiBUU_FSI_particles.h5 --visualize
 
     # Plot training curves
     python main.py --mode plot --log_dir lightning_logs/exp_name
@@ -200,6 +202,17 @@ def eval_mode(args):
         if args.seqdata_path and Path(args.seqdata_path).exists():
             print(f"Loading preprocessed data from {args.seqdata_path}...")
             test_seqdata = load_sequence_data(args.seqdata_path)
+            
+            # Limit test size if specified
+            test_size = getattr(args, 'test_size', 1000)
+            if test_size and len(test_seqdata['encoded_ids']) > test_size:
+                print(f"Limiting test data to {test_size} sequences...")
+                test_seqdata = {
+                    'encoded_ids': test_seqdata['encoded_ids'][:test_size],
+                    'particle_feats': test_seqdata['particle_feats'][:test_size],
+                    'padding_mask': test_seqdata['padding_mask'][:test_size],
+                    'causal_mask': test_seqdata['causal_mask']
+                }
         elif args.data_path:
             # Try to load preprocessed test data
             test_seqdata_path = getattr(args, 'test_seqdata_path', 'processed_test_seqdata.npz')
@@ -211,8 +224,9 @@ def eval_mode(args):
                 print("No preprocessed data found. Preparing from raw data...")
                 print(f"Loading test data from {args.data_path}...")
                 test_data = extract_particle_sequences(args.data_path)
-                # Use first 1000 events for testing
-                test_data = test_data[:1000]
+                # Use first test_size events for testing
+                test_size = getattr(args, 'test_size', 1000)
+                test_data = test_data[:test_size]
                 
                 # Prepare test sequences
                 stats_path = getattr(args, 'stats_path', 'feature_stats.json')
@@ -270,8 +284,24 @@ def generate_mode(args):
             print(f"Loading preprocessed data from {args.seqdata_path}...")
             seqdata = load_sequence_data(args.seqdata_path)
             
+            # Load feature statistics for denormalization
+            stats_path = args.stats_path if args.stats_path else 'feature_stats.json'
+            if Path(stats_path).exists():
+                from gibuu_transformer.utils import load_feature_statistics
+                from gibuu_transformer.constants import FEATS_MEAN, FEATS_SIGMA
+                # Load the statistics into local variables
+                feats_mean, feats_sigma = load_feature_statistics(stats_path)
+                print(f"Loaded feature statistics from {stats_path}")
+            else:
+                print("Warning: Feature statistics file not found. Using default values.")
+                from gibuu_transformer.constants import FEATS_MEAN, FEATS_SIGMA
+                feats_mean, feats_sigma = FEATS_MEAN, FEATS_SIGMA
+            
             # Use first event as reference
             ievt = args.event_idx or 0
+            if ievt >= len(seqdata['encoded_ids']):
+                print(f"Warning: event_idx {ievt} is out of range. Using event 0 instead.")
+                ievt = 0
             event_tokens = seqdata['encoded_ids'][ievt]
             event_feats = seqdata['particle_feats'][ievt]
         elif args.data_path:
@@ -285,7 +315,17 @@ def generate_mode(args):
             
             # Normalize features
             from gibuu_transformer.constants import FEATS_MEAN, FEATS_SIGMA
-            event_feats = (event_feats - torch.tensor(FEATS_MEAN)) / torch.tensor(FEATS_SIGMA)
+            if FEATS_MEAN is None or FEATS_SIGMA is None:
+                print("Warning: FEATS_MEAN or FEATS_SIGMA is None. Loading from feature_stats.json...")
+                stats_path = args.stats_path if args.stats_path else 'feature_stats.json'
+                if Path(stats_path).exists():
+                    from gibuu_transformer.utils import load_feature_statistics
+                    feats_mean, feats_sigma = load_feature_statistics(stats_path)
+                else:
+                    raise ValueError("Feature statistics not available and feature_stats.json not found.")
+            else:
+                feats_mean, feats_sigma = FEATS_MEAN, FEATS_SIGMA
+            event_feats = (event_feats - torch.tensor(feats_mean)) / torch.tensor(feats_sigma)
         else:
             raise ValueError("No preprocessed data found. Please run 'python main.py --mode prep' first to prepare data.")
         
@@ -324,12 +364,20 @@ def generate_mode(args):
             mask_in = torch.cat([mask_in, torch.zeros_like(next_token, dtype=torch.bool)], dim=1)
             
             # Denormalize features
-            next_feat_denorm = (next_feat[0, 0] * torch.tensor(FEATS_SIGMA).to(device) + 
-                               torch.tensor(FEATS_MEAN).to(device))
+            if feats_mean is None or feats_sigma is None:
+                print("Error: feats_mean or feats_sigma is None during generation. Cannot denormalize features.")
+                break
+            next_feat_denorm = (next_feat[0, 0] * torch.tensor(feats_sigma).to(device) + 
+                               torch.tensor(feats_mean).to(device))
             
             # Decode token
             from gibuu_transformer.data_processing import decode_id
             gibuu_id, charge, _ = decode_id(next_token.item())
+            
+            # Check for EOS token before cleanup
+            if next_token.item() == EOS_TOKEN:
+                print("EOS_TOKEN generated. Stopping generation.")
+                break
             
             # Add to output sequence
             output_sequence.append([
@@ -347,10 +395,6 @@ def generate_mode(args):
             del output, logits, feats_pred, next_token, next_feat
             if device == "cuda":
                 torch.cuda.empty_cache()
-            
-            if next_token.item() == EOS_TOKEN:
-                print("EOS_TOKEN generated. Stopping generation.")
-                break
         
         print(f"Generated {len(output_sequence)} particles")
         
@@ -363,20 +407,29 @@ def generate_mode(args):
         
         # Create visualization
         if args.visualize:
-            positions_list, momenta_list, pdg_codes_list, timestep_list = extract_visualization_lists_from_output_sequence(
-                output_sequence, GIBUU_CHARGE_TO_PDG
-            )
-            
-            # Save GIF
-            gif_path = args.output_path.replace('.json', '.gif') if args.output_path else 'generated_particles.gif'
-            save_particles_gif(
-                positions_list, momenta_list, pdg_codes_list,
-                timestep_list=timestep_list,
-                filename=gif_path,
-                xlim=[-10, 10], ylim=[-10, 10], zlim=[-10, 10],
-                fps=5
-            )
-            print(f"Visualization saved to {gif_path}")
+            try:
+                from gibuu_transformer.constants import GIBUU_CHARGE_TO_PDG
+                positions_list, momenta_list, pdg_codes_list, timestep_list = extract_visualization_lists_from_output_sequence(
+                    output_sequence, GIBUU_CHARGE_TO_PDG
+                )
+                
+                # Save GIF
+                if args.output_path:
+                    # Replace any extension with .gif
+                    gif_path = '.'.join(args.output_path.split('.')[:-1]) + '.gif' if '.' in args.output_path else args.output_path + '.gif'
+                else:
+                    gif_path = 'generated_particles.gif'
+                save_particles_gif(
+                    positions_list, momenta_list, pdg_codes_list,
+                    timestep_list=timestep_list,
+                    filename=gif_path,
+                    xlim=[-10, 10], ylim=[-10, 10], zlim=[-10, 10],
+                    fps=5
+                )
+                print(f"Visualization saved to {gif_path}")
+            except Exception as e:
+                print(f"Warning: Could not create visualization: {e}")
+                print("Generated sequence saved, but visualization failed.")
         
         return output_sequence
     else:
@@ -422,6 +475,8 @@ def main():
                        help="Path to load/save processed sequence data")
     parser.add_argument("--test_seqdata_path", type=str, default="processed_test_seqdata.npz",
                        help="Path to load/save processed test sequence data")
+    parser.add_argument("--test_size", type=int, default=1000,
+                       help="Number of sequences to use for testing (default: 1000)")
     
     # Generation arguments
     parser.add_argument("--event_idx", type=int, default=0, 
