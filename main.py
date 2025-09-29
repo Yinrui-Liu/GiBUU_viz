@@ -257,7 +257,44 @@ def eval_mode(args):
         print(f"Feature MSE: {results['feature_mse']:.6f}")
         print(f"Type Loss: {results['type_loss']:.4f}")
         print(f"Total Loss: {results['total_loss']:.4f}")
-        
+
+        # Save plots using helpers from visualization.py
+        try:
+            if args.no_plots:
+                return results
+            import os
+            os.makedirs('plots', exist_ok=True)
+            from gibuu_transformer.visualization import (
+                collect_eval_outputs,
+                save_confusion_matrix_from_tensors,
+                save_feature_hist2d_plots,
+                save_true_class_distribution,
+            )
+
+            all_preds, all_targets, all_feats_pred, all_feats_target = collect_eval_outputs(model, test_loader, device)
+
+            # True class distribution first
+            save_true_class_distribution(all_targets, 'plots/class_distribution.png', min_percent=1.0)
+
+            # Confusion matrix with requested class mapping
+            from gibuu_transformer.constants import EOS_STEP_TOKEN
+            main_classes = [1153, 1025, 1253, 1125, 997, EOS_STEP_TOKEN]
+            name_classes = [r"$p$", r"$n$", r"$\pi^+$", r"$\pi^0$", r"$\pi^-$", "EOS"]
+            others_label = -1
+            save_confusion_matrix_from_tensors(
+                all_preds, all_targets,
+                'plots/confusion_matrix.png',
+                main_classes=main_classes,
+                name_classes=name_classes,
+                others_label=others_label,
+                others_name='Others'
+            )
+
+            # 2D features with fixed ranges and KE naming
+            save_feature_hist2d_plots(all_feats_pred, all_feats_target, all_preds, all_targets, 'plots', particle_id=args.particle_id)
+        except Exception as e:
+            print(f"Warning: failed to save evaluation plots: {e}")
+
         return results
     else:
         print("No test data provided. Skipping evaluation.")
@@ -477,6 +514,10 @@ def main():
                        help="Path to load/save processed test sequence data")
     parser.add_argument("--test_size", type=int, default=1000,
                        help="Number of sequences to use for testing (default: 1000)")
+    parser.add_argument("--no_plots", action="store_true",
+                       help="Do not generate and save evaluation plots")
+    parser.add_argument("--particle_id", type=int, default=None,
+                       help="Only plot features for this specific particle ID (e.g., 1153 for protons)")
     
     # Generation arguments
     parser.add_argument("--event_idx", type=int, default=0, 

@@ -181,6 +181,224 @@ def plot_2d_feature_distribution(
     plt.show()
 
 
+def collect_eval_outputs(model, data_loader, device="cuda"):
+    """
+    Run model over data_loader and collect predictions, targets, and feature tensors
+    for downstream plotting. Returns CPU tensors.
+    """
+    model.to(device)
+    model.eval()
+    all_preds = []
+    all_targets = []
+    all_feats_pred = []
+    all_feats_target = []
+    with torch.no_grad():
+        for batch in data_loader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            out = model(batch['encoded_ids'], batch['particle_feats'], batch['padding_mask'])
+            # next-token shift
+            types = out['particle_types'][:, :-1]
+            feats = out['particle_feats'][:, :-1]
+            tgt_types = batch['encoded_ids'][:, 1:]
+            tgt_feats = batch['particle_feats'][:, 1:]
+            preds = torch.argmax(types, dim=-1)
+            all_preds.append(preds.cpu())
+            all_targets.append(tgt_types.cpu())
+            all_feats_pred.append(feats.cpu())
+            all_feats_target.append(tgt_feats.cpu())
+
+    all_preds = torch.cat(all_preds, dim=0)
+    all_targets = torch.cat(all_targets, dim=0)
+    all_feats_pred = torch.cat(all_feats_pred, dim=0)
+    all_feats_target = torch.cat(all_feats_target, dim=0)
+    return all_preds, all_targets, all_feats_pred, all_feats_target
+
+
+def save_confusion_matrix_from_tensors(all_preds, all_targets, out_path: str,
+                                       main_classes=None, name_classes=None,
+                                       others_label: int = -1, others_name: str = 'Others'):
+    """
+    Save confusion matrix image to out_path. Filters out PAD/EOS tokens.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Only filter out PAD tokens, keep EOS tokens for confusion matrix
+    valid_mask = (all_targets != PAD_TOKEN)
+    y_true = all_targets[valid_mask].view(-1).numpy()
+    y_pred = all_preds[valid_mask].view(-1).numpy()
+    if y_true.size == 0:
+        print(f"Confusion matrix skipped: no valid tokens for {out_path}")
+        return
+    # Map to main classes + others, with provided labels
+    if main_classes is not None and name_classes is not None:
+        # Build mapping from original class to label index
+        label_ids = list(main_classes) + [others_label]
+        label_names = list(name_classes) + [others_name]
+        label_to_idx = {c: i for i, c in enumerate(label_ids)}
+        def map_to_label(v):
+            return label_to_idx.get(int(v), label_to_idx[others_label])
+        y_true_mapped = np.array([map_to_label(v) for v in y_true])
+        y_pred_mapped = np.array([map_to_label(v) for v in y_pred])
+        cm = confusion_matrix(y_true_mapped, y_pred_mapped, labels=list(range(len(label_ids))))
+        # Normalize rows to ratios 0..1 and annotate with counts
+        with np.errstate(all='ignore'):
+            row_sums = cm.sum(axis=1, keepdims=True)
+            cm_ratio = np.divide(cm, row_sums, out=np.zeros_like(cm, dtype=float), where=row_sums!=0)
+        plt.figure(figsize=(9, 7))
+        im = plt.imshow(cm_ratio, interpolation='nearest', cmap='Blues', vmin=0.0, vmax=1.0, aspect='auto')
+        plt.title('Confusion Matrix')
+        plt.xlabel('Predicted label')
+        plt.ylabel('True label')
+        plt.xticks(ticks=np.arange(len(label_names)), labels=label_names, rotation=45, ha='right')
+        plt.yticks(ticks=np.arange(len(label_names)), labels=label_names)
+        plt.gca().invert_yaxis()  # match notebook convention
+        cbar = plt.colorbar(im)
+        cbar.set_label('Row-normalized ratios with counts in the parentheses')
+        # Annotate: ratio with counts in parentheses
+        for i in range(cm_ratio.shape[0]):
+            for j in range(cm_ratio.shape[1]):
+                ratio = cm_ratio[i, j]
+                count = cm[i, j]
+                txt = f"{ratio:.2f}\n({count})"
+                if ratio > 0.005 or count > 0:  # avoid cluttering totally empty cells
+                    plt.text(j, i, txt, ha='center', va='center', fontsize=8, color='black')
+    else:
+        cm = confusion_matrix(y_true, y_pred)
+        plt.figure(figsize=(8, 6))
+        vmax = np.percentile(cm, 99) if cm.size > 0 else None
+        plt.imshow(cm, interpolation='nearest', cmap='Blues', vmax=vmax)
+        plt.title('Confusion Matrix')
+        plt.xlabel('Predicted')
+        plt.ylabel('True')
+        plt.colorbar()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Saved {out_path}")
+
+
+def save_feature_hist2d_plots(all_feats_pred, all_feats_target, all_preds, all_targets, out_dir: str, particle_id=None):
+    """
+    Save seven 2D hist plots (pred vs true) for features x,y,z,E,Px,Py,Pz into out_dir.
+    Features are denormalized using FEATS_* constants if available.
+    
+    Parameters:
+    -----------
+    particle_id : int, optional
+        If specified, only plot features for this specific particle ID
+    """
+    import os
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Denormalize
+    feats_sigma = torch.tensor(FEATS_SIGMA if FEATS_SIGMA is not None else [1,1,1,1,1,1,1])
+    feats_mean = torch.tensor(FEATS_MEAN if FEATS_MEAN is not None else [0,0,0,0,0,0,0])
+    all_feats_pred = (all_feats_pred * feats_sigma + feats_mean).float()
+    all_feats_target = (all_feats_target * feats_sigma + feats_mean).float()
+
+    os.makedirs(out_dir, exist_ok=True)
+    feature_names = ['x','y','z','KE','Px','Py','Pz']
+
+    for fi, fname in enumerate(feature_names):
+        # Filter out PAD and EOS tokens for feature plots (they don't have meaningful physical features)
+        mask = (all_targets != PAD_TOKEN) & (all_targets != EOS_TOKEN) & (all_targets != EOS_STEP_TOKEN)
+        
+        # If particle_id is specified, only include that particle type
+        if particle_id is not None:
+            mask = mask & (all_targets == particle_id)
+            
+        x = all_feats_pred[..., fi][mask].flatten().numpy()
+        y = all_feats_target[..., fi][mask].flatten().numpy()
+        if x.size == 0 or y.size == 0:
+            print(f"2D feature plot skipped for {fname}: no data")
+            continue
+            
+        # Set appropriate ranges for x/y axes (not color bar)
+        if fi in (0, 1, 2):  # x, y, z in fm
+            xmin, xmax = -20.0, 20.0
+        elif fi == 3:        # KE in GeV
+            xmin, xmax = 0.0, 3.0
+        elif fi in (4, 5):   # Px, Py in GeV
+            xmin, xmax = -1.0, 1.0
+        else:                # Pz in GeV
+            xmin, xmax = -1.0, 3.0
+            
+        # Create histogram bins for x/y axes
+        bins = np.linspace(xmin, xmax, 101)
+        
+        # Plot 2D histogram
+        cmap = plt.get_cmap('viridis').copy()
+        cmap.set_bad('white')
+        plt.figure(figsize=(7, 6))
+        plt.hist2d(x, y, bins=bins, cmap=cmap, cmin=1)
+        plt.plot([xmin, xmax], [xmin, xmax], 'r:')  # diagonal line
+        
+        # Axis labels with units
+        units = 'fm' if fi in (0,1,2) else 'GeV'
+        plt.xlabel(f'Predicted {fname} [{units}]', fontsize=12)
+        plt.ylabel(f'True {fname} [{units}]', fontsize=12)
+        plt.xlim(xmin, xmax)
+        plt.ylim(xmin, xmax)
+        
+        # Title
+        title = f'2D Feature Distribution: {fname}'
+        if particle_id is not None:
+            title += f' (Particle ID: {particle_id})'
+        plt.title(title)
+        
+        # Color bar (independent of x/y limits)
+        plt.colorbar(label='Counts')
+        plt.tight_layout()
+        
+        # Save the plot
+        out_path = os.path.join(out_dir, f'feature_{fi}_{fname}.png')
+        plt.savefig(out_path, dpi=150)
+        plt.close()
+        print(f"Saved {out_path}")
+
+
+def save_true_class_distribution(all_targets, out_path: str, min_percent: float = 1.0):
+    """
+    Save a bar plot showing the distribution of true classes in the sample,
+    filtering to classes exceeding min_percent.
+    """
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Only filter out PAD tokens, keep EOS tokens for distribution
+    mask = (all_targets != PAD_TOKEN)
+    flat_targets = all_targets[mask].flatten().numpy()
+    unique, counts = np.unique(flat_targets, return_counts=True)
+    total = counts.sum() if counts.size > 0 else 1
+    percentages = counts / total * 100.0
+    sel = percentages > min_percent
+    filtered_classes = unique[sel]
+    filtered_percentages = percentages[sel]
+
+    if filtered_classes.size == 0:
+        print(f"Class distribution skipped: no classes > {min_percent}%")
+        return
+
+    plt.figure(figsize=(10, 4))
+    plt.bar([str(int(c)) for c in filtered_classes], filtered_percentages)
+    plt.ylabel('Percentage (%)')
+    plt.xlabel('Class ID')
+    plt.title('Class Distribution in Test Sample (>1%)')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Saved {out_path}")
+
+
 def extract_visualization_lists_from_output_sequence(output_sequence, gibuu_charge_to_pdg):
     """
     Given output_sequence and a lookup table, return positions_list, momenta_list, pdg_codes_list, timestep_list.
