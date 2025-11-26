@@ -6,10 +6,18 @@ Constants and token definitions for GiBUU Transformer.
 EOS_STEP_TOKEN = 0x400  # 0b10000000000 (1024) - End of time step
 EOS_TOKEN = 0  # End of sequence (TB deprecated, now used the same as PAD_TOKEN)
 PAD_TOKEN = 0  # Padding token
+START_TOKEN = 0x800  # 0b100000000000 (2048) - Start of decoder sequence
 
-# Feature normalization constants (from the notebook)
-FEATS_MEAN = None #[-7.29314323e-03, -2.40098036e-02, 3.47797358e+00, 1.04073876e+00, -1.41737541e-04, 1.54463698e-04, 2.55886665e-01]
-FEATS_SIGMA = None # [4.41566758, 4.4296644, 5.7685071, 0.54804293, 0.25829807, 0.25919817, 0.64238038]
+# Feature normalization constants
+# These should be computed from training data and set before training/inference
+# Features: [x, y, z, KE, Px, Py, Pz] where KE = E - m
+FEATS_MEAN = None  # Will be set from training data
+FEATS_SIGMA = None  # Will be set from training data
+
+# Delta normalization statistics for ParticlePropagationModel
+# Used to normalize deltas (differences) between consecutive time steps
+FEATS_DELTA_MEAN = None  # Will be set from training data
+FEATS_DELTA_SIGMA = None  # Will be set from training data
 
 # GiBUU ID to PDG code mapping
 GIBUU_CHARGE_TO_PDG = {

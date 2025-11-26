@@ -564,3 +564,340 @@ def build_gibuu_h5_from_root(
             else:
                 dset[i] = np.array(recs, dtype=dtype_particle)
     print(f"[Saved] {out_path} with key '{group_key}' and {n_events} events")
+
+
+def extract_timestep_pairs(raw_sequences, max_particles=200):
+    """
+    Extract pairs of consecutive time steps from raw sequences.
+    No padding - sequences keep their natural length (truncated if exceeding max_particles).
+    
+    Parameters:
+    -----------
+    raw_sequences: List of lists
+        Each inner list is a sequence of particle tokens: [ts, gibuuID, chg, x, y, z, m, E, Px, Py, Pz]
+    max_particles: int
+        Maximum number of particles per time step (truncate if exceeded, default: 200)
+        
+    Returns:
+    --------
+    pairs: List of tuples
+        Each tuple is (input_tokens, output_tokens) where:
+        - input_tokens: List of tokens at time step t (variable length, max max_particles)
+        - output_tokens: List of tokens at time step t+1 (variable length, max max_particles)
+    """
+    pairs = []
+    
+    for sequence in raw_sequences:
+        if len(sequence) == 0:
+            continue
+            
+        # Group particles by time step
+        time_steps = {}
+        for token in sequence:
+            ts = token[0]
+            if ts not in time_steps:
+                time_steps[ts] = []
+            time_steps[ts].append(token)
+        
+        # Sort time steps
+        sorted_ts = sorted(time_steps.keys())
+        
+        # Create pairs of consecutive time steps
+        for i in range(len(sorted_ts) - 1):
+            ts_t = sorted_ts[i]
+            ts_t1 = sorted_ts[i + 1]
+            
+            input_tokens = time_steps[ts_t]
+            output_tokens = time_steps[ts_t1]
+            
+            # Truncate if exceeding max_particles (no padding here)
+            if len(input_tokens) > max_particles:
+                input_tokens = input_tokens[:max_particles]
+            if len(output_tokens) > max_particles:
+                output_tokens = output_tokens[:max_particles]
+            
+            pairs.append((input_tokens, output_tokens))
+    
+    return pairs
+
+
+def filter_pairs_with_changes(pairs):
+    """
+    Filter time step pairs to only keep those where particles change.
+    
+    A pair is kept if:
+    1. The number of particles changes between time steps, OR
+    2. If the number matches, the particle types (gibuuID, charge) don't match in order
+    
+    Parameters:
+    -----------
+    pairs: List of tuples
+        Each tuple is (input_tokens, output_tokens) where tokens are:
+        [ts, gibuuID, chg, x, y, z, m, E, Px, Py, Pz]
+        
+    Returns:
+    --------
+    pairs_with_changes: List of tuples
+        Pairs that have particle changes
+    pairs_without_changes: List of tuples
+        Pairs that don't have particle changes (for reference/analysis)
+    """
+    pairs_with_changes = []
+    pairs_without_changes = []
+    
+    # Pre-extract all particle counts for vectorized comparison
+    input_counts = np.array([len(input_tokens) for input_tokens, _ in pairs])
+    output_counts = np.array([len(output_tokens) for _, output_tokens in pairs])
+    
+    # Find pairs where count changes (vectorized)
+    count_changes = input_counts != output_counts
+    
+    # Process pairs in batches for efficiency
+    for idx, (input_tokens, output_tokens) in enumerate(pairs):
+        # If count changed, keep it
+        if count_changes[idx]:
+            pairs_with_changes.append((input_tokens, output_tokens))
+            continue
+        
+        # If count is same, check if types match in order (vectorized)
+        if len(input_tokens) == 0:
+            # Empty sequences - skip
+            continue
+        
+        # Extract gibuuID and charge for both input and output
+        input_gibuu = np.array([token[1] for token in input_tokens], dtype=int)
+        input_charge = np.array([token[2] for token in input_tokens], dtype=int)
+        output_gibuu = np.array([token[1] for token in output_tokens], dtype=int)
+        output_charge = np.array([token[2] for token in output_tokens], dtype=int)
+        
+        # Create composite keys: gibuuID * 1000 + (charge + 8) to handle negative charges
+        input_keys = input_gibuu * 1000 + (input_charge + 8)
+        output_keys = output_gibuu * 1000 + (output_charge + 8)
+        
+        # Vectorized comparison: check if types match in order
+        if not np.array_equal(input_keys, output_keys):
+            # Types don't match - keep this pair
+            pairs_with_changes.append((input_tokens, output_tokens))
+        else:
+            # Types match exactly - no change
+            pairs_without_changes.append((input_tokens, output_tokens))
+    
+    return pairs_with_changes, pairs_without_changes
+
+
+def prepare_interaction_data(pairs, stats_path=None, save_stats_path=None):
+    """
+    Prepare interaction pairs for transformer training (encoder-decoder architecture).
+    
+    Prepares pairs where particle types/counts change between time steps.
+    Returns variable-length sequences (padding happens in collate_fn).
+    
+    Parameters:
+    -----------
+    pairs: List of tuples
+        Each tuple is (input_tokens, output_tokens) where tokens are:
+        [ts, gibuuID, chg, x, y, z, m, E, Px, Py, Pz]
+    stats_path: str, optional
+        Path to load pre-computed feature statistics
+    save_stats_path: str, optional
+        Path to save computed feature statistics
+        
+    Returns:
+    --------
+    data_dict: dict
+        Dictionary containing:
+        - 'input_encoded_ids': List of lists (encoder input: particles + EOS)
+        - 'input_particle_feats': List of lists (encoder input features)
+        - 'output_encoded_ids': List of lists (decoder input: START + particles + EOS)
+        - 'output_particle_feats': List of lists (decoder input features)
+    """
+    from .constants import EOS_STEP_TOKEN, START_TOKEN
+    from .utils import calculate_feature_statistics, load_feature_statistics
+    
+    print(f"Preparing {len(pairs)} interaction pairs for training...")
+    
+    # Handle feature statistics
+    global FEATS_MEAN, FEATS_SIGMA
+    from . import constants
+    
+    if stats_path:
+        FEATS_MEAN, FEATS_SIGMA = load_feature_statistics(stats_path)
+        constants.FEATS_MEAN = FEATS_MEAN
+        constants.FEATS_SIGMA = FEATS_SIGMA
+    elif constants.FEATS_MEAN is None or constants.FEATS_SIGMA is None:
+        print("Calculating feature statistics...")
+        all_tokens = []
+        for input_tokens, _ in pairs:
+            all_tokens.extend(input_tokens)
+        FEATS_MEAN, FEATS_SIGMA = calculate_feature_statistics([all_tokens], save_stats_path)
+        constants.FEATS_MEAN = FEATS_MEAN
+        constants.FEATS_SIGMA = FEATS_SIGMA
+    else:
+        FEATS_MEAN = constants.FEATS_MEAN
+        FEATS_SIGMA = constants.FEATS_SIGMA
+    
+    # Define START token
+    START_TOKEN = 0x800
+    
+    # Process pairs
+    input_encoded_ids_list = []
+    input_particle_feats_list = []
+    output_encoded_ids_list = []
+    output_particle_feats_list = []
+    
+    eos_feats = [0.0] * 7
+    start_feats = [0.0] * 7
+    
+    for input_tokens, output_tokens in pairs:
+        # Encoder input: [P1, P2, ..., EOS]
+        input_ids = []
+        input_feats = []
+        for token in input_tokens:
+            ts, gibuu_id, charge, x, y, z, m, E, Px, Py, Pz = token
+            encoded_id = encode_id(gibuu_id, charge)
+            features = np.array([x, y, z, E-m, Px, Py, Pz])
+            features = (features - np.array(FEATS_MEAN)) / np.array(FEATS_SIGMA)
+            input_ids.append(encoded_id)
+            input_feats.append(features.tolist())
+        
+        input_ids.append(EOS_STEP_TOKEN)
+        input_feats.append(eos_feats)
+        
+        # Decoder input: [START, P1, P2, ..., EOS]
+        output_ids = [START_TOKEN]
+        output_feats = [start_feats]
+        
+        for token in output_tokens:
+            ts, gibuu_id, charge, x, y, z, m, E, Px, Py, Pz = token
+            encoded_id = encode_id(gibuu_id, charge)
+            features = np.array([x, y, z, E-m, Px, Py, Pz])
+            features = (features - np.array(FEATS_MEAN)) / np.array(FEATS_SIGMA)
+            output_ids.append(encoded_id)
+            output_feats.append(features.tolist())
+        
+        output_ids.append(EOS_STEP_TOKEN)
+        output_feats.append(eos_feats)
+        
+        input_encoded_ids_list.append(input_ids)
+        input_particle_feats_list.append(input_feats)
+        output_encoded_ids_list.append(output_ids)
+        output_particle_feats_list.append(output_feats)
+    
+    print(f"✓ Prepared {len(pairs)} interaction pairs")
+    print(f"  Features: [x, y, z, KE, Px, Py, Pz] where KE = E - m")
+    print(f"  Normalization: (feature - FEATS_MEAN) / FEATS_SIGMA")
+    
+    return {
+        'input_encoded_ids': input_encoded_ids_list,
+        'input_particle_feats': input_particle_feats_list,
+        'output_encoded_ids': output_encoded_ids_list,
+        'output_particle_feats': output_particle_feats_list
+    }
+
+
+def prepare_propagation_data(pairs_without_changes, pairs_with_changes, stats_path=None):
+    """
+    Prepare data for propagation model training.
+    
+    Uses both non-interaction pairs (for feature prediction) and interaction pairs (for classification).
+    
+    Parameters:
+    -----------
+    pairs_without_changes: List of tuples
+        Pairs where particles don't change (interaction=0)
+    pairs_with_changes: List of tuples
+        Pairs where particles DO change (interaction=1)
+    stats_path: str, optional
+        Path to load pre-computed feature statistics
+        
+    Returns:
+    --------
+    data_dict: dict
+        Dictionary containing:
+        - 'particle_types': List of lists - encoded particle IDs
+        - 'input_features': List of arrays - features at time t
+        - 'target_features': List of arrays or None - features at time t+1
+        - 'target_interaction': List of binary flags (0=no interaction, 1=interaction)
+        - 'has_target_features': List of bools
+    """
+    from .utils import calculate_feature_statistics, load_feature_statistics
+    from . import constants
+    
+    print(f"Preparing propagation data...")
+    print(f"  Non-interaction pairs: {len(pairs_without_changes)}")
+    print(f"  Interaction pairs: {len(pairs_with_changes)}")
+    
+    # Handle feature statistics
+    if stats_path:
+        FEATS_MEAN, FEATS_SIGMA = load_feature_statistics(stats_path)
+        constants.FEATS_MEAN = FEATS_MEAN
+        constants.FEATS_SIGMA = FEATS_SIGMA
+    elif constants.FEATS_MEAN is None or constants.FEATS_SIGMA is None:
+        print("Calculating feature statistics...")
+        all_tokens = []
+        for input_tokens, _ in pairs_without_changes + pairs_with_changes:
+            all_tokens.extend(input_tokens)
+        FEATS_MEAN, FEATS_SIGMA = calculate_feature_statistics([all_tokens])
+        constants.FEATS_MEAN = FEATS_MEAN
+        constants.FEATS_SIGMA = FEATS_SIGMA
+    else:
+        FEATS_MEAN = constants.FEATS_MEAN
+        FEATS_SIGMA = constants.FEATS_SIGMA
+    
+    feats_mean = np.array(FEATS_MEAN)
+    feats_sigma = np.array(FEATS_SIGMA)
+    
+    # Process pairs
+    particle_types_list = []
+    input_features_list = []
+    target_features_list = []
+    target_interaction_list = []
+    has_target_features_list = []
+    
+    # Process non-interaction pairs
+    for input_tokens, output_tokens in pairs_without_changes:
+        if len(input_tokens) == 0 or len(input_tokens) != len(output_tokens):
+            continue
+        
+        input_ids = [encode_id(token[1], token[2]) for token in input_tokens]
+        input_feats_unnorm = np.array([[x, y, z, E-m, Px, Py, Pz] 
+                                       for ts, _, _, x, y, z, m, E, Px, Py, Pz in input_tokens])
+        input_feats = (input_feats_unnorm - feats_mean) / feats_sigma
+        
+        output_feats_unnorm = np.array([[x, y, z, E-m, Px, Py, Pz] 
+                                        for ts, _, _, x, y, z, m, E, Px, Py, Pz in output_tokens])
+        target_feats = (output_feats_unnorm - feats_mean) / feats_sigma
+        
+        particle_types_list.append(input_ids)
+        input_features_list.append(input_feats)
+        target_features_list.append(target_feats)
+        target_interaction_list.append(0)
+        has_target_features_list.append(True)
+    
+    # Process interaction pairs
+    for input_tokens, output_tokens in pairs_with_changes:
+        if len(input_tokens) == 0:
+            continue
+        
+        input_ids = [encode_id(token[1], token[2]) for token in input_tokens]
+        input_feats_unnorm = np.array([[x, y, z, E-m, Px, Py, Pz] 
+                                       for ts, _, _, x, y, z, m, E, Px, Py, Pz in input_tokens])
+        input_feats = (input_feats_unnorm - feats_mean) / feats_sigma
+        
+        particle_types_list.append(input_ids)
+        input_features_list.append(input_feats)
+        target_features_list.append(None)
+        target_interaction_list.append(1)
+        has_target_features_list.append(False)
+    
+    print(f"✓ Prepared {len(particle_types_list)} steps")
+    print(f"  Non-interaction: {sum(1 for x in target_interaction_list if x == 0)}")
+    print(f"  Interaction: {sum(target_interaction_list)}")
+    
+    return {
+        'particle_types': particle_types_list,
+        'input_features': input_features_list,
+        'target_features': target_features_list,
+        'target_interaction': target_interaction_list,
+        'has_target_features': has_target_features_list
+    }
