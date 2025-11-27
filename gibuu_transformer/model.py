@@ -233,3 +233,272 @@ class GiBUUTransformer(nn.Module):
             aux_outputs.append(x)
         
         return aux_outputs
+
+
+class GiBUUPropagationModel(nn.Module):
+    """
+    Particle propagation model with zero-inflated architecture for predicting feature changes.
+    
+    This model predicts:
+    1. Position deltas (Δx, Δy, Δz) - always predicted
+    2. Energy/momentum changes with zero-inflation:
+       - Binary flag: "Are ALL E/p components unchanged?" (per particle)
+       - If not all zero, predicts all 4 values: ΔKE, ΔPx, ΔPy, ΔPz
+    3. Interaction flag: Step-level binary indicating whether interactions will occur
+    
+    Parameters:
+    -----------
+    num_particle_types : int
+        Size of particle type vocabulary (default: 4096)
+    feature_dim : int
+        Number of input features per particle (default: 7 for [x,y,z,KE,Px,Py,Pz])
+    hidden_dims : list of int
+        Hidden layer dimensions for MLP encoder (default: [256, 128, 64])
+    dropout : float
+        Dropout rate (default: 0.1)
+    aggregation_method : str
+        Method to aggregate particle representations for step-level prediction
+        Options: 'mean', 'max', 'attention' (default: 'mean')
+    use_zero_inflation : bool
+        If True, uses zero-inflated architecture for E/p predictions
+        If False, directly predicts all 7 deltas (simpler model)
+        (default: True)
+    """
+    
+    def __init__(
+        self,
+        num_particle_types=4096,
+        feature_dim=7,
+        hidden_dims=[256, 128, 64],
+        dropout=0.1,
+        aggregation_method='mean',
+        use_zero_inflation=True
+    ):
+        super().__init__()
+        
+        from .constants import FEATS_MEAN, FEATS_SIGMA, FEATS_DELTA_MEAN, FEATS_DELTA_SIGMA
+        
+        self.feature_dim = feature_dim
+        self.aggregation_method = aggregation_method
+        self.use_zero_inflation = use_zero_inflation
+        
+        # Particle type embedding
+        self.particle_type_embedding = nn.Embedding(
+            num_particle_types, 
+            embedding_dim=16,
+            padding_idx=None
+        )
+        
+        # Shared encoder
+        input_dim = 16 + feature_dim
+        encoder_layers = []
+        prev_dim = input_dim
+        for hidden_dim in hidden_dims:
+            encoder_layers.extend([
+                nn.Linear(prev_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ])
+            prev_dim = hidden_dim
+        
+        self.shared_encoder = nn.Sequential(*encoder_layers)
+        encoder_output_dim = hidden_dims[-1]
+        
+        if aggregation_method == 'attention':
+            self.attention = nn.Sequential(
+                nn.Linear(encoder_output_dim, 64),
+                nn.Tanh(),
+                nn.Linear(64, 1)
+            )
+        
+        if use_zero_inflation:
+            # Zero-inflated architecture
+            # Position head (Δx, Δy, Δz)
+            self.position_head = nn.Sequential(
+                nn.Linear(encoder_output_dim, 128),
+                nn.LayerNorm(128),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(128, 64),
+                nn.LayerNorm(64),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(64, 3)
+            )
+            
+            # E/p zero classifier: Single binary per particle
+            # "Are ALL 4 E/p components unchanged?"
+            self.em_zero_classifier = nn.Sequential(
+                nn.Linear(encoder_output_dim, 128),
+                nn.LayerNorm(128),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(128, 64),
+                nn.LayerNorm(64),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(64, 1),  # Single output per particle
+                nn.Sigmoid()
+            )
+            
+            # E/p value predictor: If not all zero, predict all 4 values
+            self.em_value_predictor = nn.Sequential(
+                nn.Linear(encoder_output_dim, 128),
+                nn.LayerNorm(128),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(128, 64),
+                nn.LayerNorm(64),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(64, 4)  # 4 values: ΔKE, ΔPx, ΔPy, ΔPz
+            )
+            
+            # Initialize
+            nn.init.xavier_uniform_(self.position_head[-1].weight, gain=0.1)
+            nn.init.zeros_(self.position_head[-1].bias)
+            nn.init.xavier_uniform_(self.em_value_predictor[-1].weight, gain=0.1)
+            nn.init.zeros_(self.em_value_predictor[-1].bias)
+            
+            # Normalization buffers (separate for position and E/p)
+            self.register_buffer('position_delta_mean', torch.tensor(FEATS_DELTA_MEAN[:3], dtype=torch.float32))
+            self.register_buffer('position_delta_sigma', torch.tensor(FEATS_DELTA_SIGMA[:3], dtype=torch.float32))
+            self.register_buffer('em_delta_mean_nonzero', torch.tensor(FEATS_DELTA_MEAN[3:], dtype=torch.float32))
+            self.register_buffer('em_delta_sigma_nonzero', torch.tensor(FEATS_DELTA_SIGMA[3:], dtype=torch.float32))
+        else:
+            # Simple architecture: Direct prediction of all 7 deltas
+            self.delta_predictor = nn.Sequential(
+                nn.Linear(encoder_output_dim, 128),
+                nn.LayerNorm(128),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(128, 64),
+                nn.LayerNorm(64),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(64, 7)  # All 7 deltas: Δx, Δy, Δz, ΔKE, ΔPx, ΔPy, ΔPz
+            )
+            
+            # Initialize
+            nn.init.xavier_uniform_(self.delta_predictor[-1].weight, gain=0.1)
+            nn.init.zeros_(self.delta_predictor[-1].bias)
+            
+            # Normalization buffers (all deltas use same stats)
+            self.register_buffer('delta_mean', torch.tensor(FEATS_DELTA_MEAN, dtype=torch.float32))
+            self.register_buffer('delta_sigma', torch.tensor(FEATS_DELTA_SIGMA, dtype=torch.float32))
+        
+        # Interaction head (shared for both architectures)
+        self.interaction_head = nn.Sequential(
+            nn.Linear(encoder_output_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+        
+        # Feature normalization buffers (shared)
+        self.register_buffer('feats_mean', torch.tensor(FEATS_MEAN, dtype=torch.float32))
+        self.register_buffer('feats_sigma', torch.tensor(FEATS_SIGMA, dtype=torch.float32))
+    
+    def forward(self, particle_type, features, padding_mask=None):
+        """
+        Forward pass.
+        
+        Parameters:
+        -----------
+        particle_type : torch.Tensor
+            Encoded particle type IDs, shape (batch, num_particles)
+        features : torch.Tensor
+            Normalized particle features, shape (batch, num_particles, feature_dim)
+        padding_mask : torch.Tensor, optional
+            Boolean mask for padded particles, shape (batch, num_particles)
+            True for padded positions
+        
+        Returns:
+        --------
+        dict with keys:
+            - 'interaction_prediction': Step-level interaction flag, shape (batch,)
+            - If use_zero_inflation=True:
+                - 'position_deltas': Position deltas, shape (batch, N, 3)
+                - 'em_prob_all_zero': Probability all E/p are zero, shape (batch, N)
+                - 'em_delta_values': E/p delta values, shape (batch, N, 4)
+                - 'em_deltas': Final E/p deltas (weighted), shape (batch, N, 4)
+                - 'predicted_deltas': All 7 deltas, shape (batch, N, 7)
+            - If use_zero_inflation=False:
+                - 'predicted_deltas': All 7 deltas, shape (batch, N, 7)
+        """
+        batch_size, num_particles = features.size(0), features.size(1)
+        
+        # Encode
+        type_embedding = self.particle_type_embedding(particle_type)
+        combined = torch.cat([type_embedding, features], dim=-1)
+        combined_flat = combined.reshape(-1, combined.size(-1))
+        encoded_flat = self.shared_encoder(combined_flat)
+        encoded = encoded_flat.reshape(batch_size, num_particles, -1)
+        
+        # Aggregate for interaction prediction
+        if self.aggregation_method == 'mean':
+            if padding_mask is not None:
+                valid_mask = ~padding_mask
+                encoded_masked = encoded * valid_mask.unsqueeze(-1).float()
+                num_valid = valid_mask.sum(dim=1, keepdim=True).float().clamp(min=1.0)
+                step_representation = encoded_masked.sum(dim=1) / num_valid
+            else:
+                step_representation = encoded.mean(dim=1)
+        elif self.aggregation_method == 'max':
+            if padding_mask is not None:
+                encoded_masked = encoded.clone()
+                encoded_masked[padding_mask] = float('-inf')
+                step_representation = encoded_masked.max(dim=1)[0]
+            else:
+                step_representation = encoded.max(dim=1)[0]
+        elif self.aggregation_method == 'attention':
+            attention_scores = self.attention(encoded)
+            if padding_mask is not None:
+                attention_scores = attention_scores.masked_fill(padding_mask.unsqueeze(-1), float('-inf'))
+            attention_weights = F.softmax(attention_scores, dim=1)
+            step_representation = (encoded * attention_weights).sum(dim=1)
+        
+        interaction_prediction = self.interaction_head(step_representation).squeeze(-1)
+        
+        if self.use_zero_inflation:
+            # Zero-inflated predictions
+            # Position deltas
+            position_deltas_flat = self.position_head(encoded_flat)
+            position_deltas = position_deltas_flat.reshape(batch_size, num_particles, 3)
+            
+            # E/p: Single binary per particle
+            em_prob_all_zero_flat = self.em_zero_classifier(encoded_flat)  # (batch*N, 1)
+            em_prob_all_zero = em_prob_all_zero_flat.reshape(batch_size, num_particles)  # (batch, N)
+            
+            # E/p: All 4 values if not zero
+            em_delta_values_flat = self.em_value_predictor(encoded_flat)  # (batch*N, 4)
+            em_delta_values = em_delta_values_flat.reshape(batch_size, num_particles, 4)
+            
+            # Final E/p deltas: weighted by (1 - prob_all_zero)
+            em_deltas = (1 - em_prob_all_zero).unsqueeze(-1) * em_delta_values  # (batch, N, 4)
+            
+            # Combine
+            predicted_deltas = torch.cat([position_deltas, em_deltas], dim=-1)
+            
+            return {
+                'interaction_prediction': interaction_prediction,
+                'position_deltas': position_deltas,
+                'em_prob_all_zero': em_prob_all_zero,
+                'em_delta_values': em_delta_values,
+                'em_deltas': em_deltas,
+                'predicted_deltas': predicted_deltas
+            }
+        else:
+            # Simple direct prediction
+            predicted_deltas_flat = self.delta_predictor(encoded_flat)
+            predicted_deltas = predicted_deltas_flat.reshape(batch_size, num_particles, 7)
+            
+            return {
+                'interaction_prediction': interaction_prediction,
+                'predicted_deltas': predicted_deltas
+            }
