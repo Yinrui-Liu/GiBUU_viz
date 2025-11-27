@@ -9,15 +9,16 @@ PAD_TOKEN = 0  # Padding token
 START_TOKEN = 0x800  # 0b100000000000 (2048) - Start of decoder sequence
 
 # Feature normalization constants
-# These should be computed from training data and set before training/inference
+# Computed from training data using GiBUU_dataprep.ipynb
 # Features: [x, y, z, KE, Px, Py, Pz] where KE = E - m
-FEATS_MEAN = None  # Will be set from training data
-FEATS_SIGMA = None  # Will be set from training data
+FEATS_MEAN = [0.0, 0.0, 6.13, 0.42, 0.0, 0.0, 0.5]
+FEATS_SIGMA = [5.89, 5.89, 9.33, 0.975, 0.304, 0.304, 1.123]
 
 # Delta normalization statistics for ParticlePropagationModel
 # Used to normalize deltas (differences) between consecutive time steps
-FEATS_DELTA_MEAN = None  # Will be set from training data
-FEATS_DELTA_SIGMA = None  # Will be set from training data
+# Filtered to exclude transitions where all E/P features are near-zero
+FEATS_DELTA_MEAN = [0.0, 0.0, 0.05, 0.0, 0.0, 0.0, 0.0]
+FEATS_DELTA_SIGMA = [0.165, 0.165, 0.184, 6.72e-05, 1.25e-2, 1.25e-2, 1.25e-2]
 
 # GiBUU ID to PDG code mapping
 GIBUU_CHARGE_TO_PDG = {
