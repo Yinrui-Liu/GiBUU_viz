@@ -277,3 +277,94 @@ def convert_root_to_h5(root_data_path, h5_output_path):
     )
     
     print(f"Successfully converted ROOT files to H5: {h5_output_path}")
+
+
+def list_checkpoints(experiment_name, log_dir="lightning_logs"):
+    """
+    List all available checkpoints for an experiment.
+    
+    Parameters:
+    -----------
+    experiment_name: str
+        Name of the experiment
+    log_dir: str
+        Directory where logs are saved (default: "lightning_logs")
+        
+    Returns:
+    --------
+    checkpoint_paths: list of str
+        List of checkpoint paths, sorted by modification time (newest first)
+    """
+    checkpoint_dir = Path(log_dir) / experiment_name / "checkpoints"
+    if not checkpoint_dir.exists():
+        print(f"No checkpoint directory found for experiment: {experiment_name}")
+        return []
+    
+    checkpoint_files = sorted(checkpoint_dir.glob('*.ckpt'), key=lambda x: x.stat().st_mtime, reverse=True)
+    
+    if not checkpoint_files:
+        print(f"No checkpoints found in {checkpoint_dir}")
+        return []
+    
+    print(f"Available checkpoints for '{experiment_name}':")
+    for i, ckpt in enumerate(checkpoint_files, 1):
+        size_mb = ckpt.stat().st_size / (1024 * 1024)
+        modified = ckpt.stat().st_mtime
+        import datetime
+        mod_time = datetime.datetime.fromtimestamp(modified).strftime('%Y-%m-%d %H:%M:%S')
+        print(f"  {i}. {ckpt.name} ({size_mb:.1f} MB, {mod_time})")
+    
+    return [str(f) for f in checkpoint_files]
+
+
+def find_checkpoint(experiment_name, checkpoint_path=None, checkpoint_name="last.ckpt", log_dir="lightning_logs"):
+    """
+    Find a checkpoint for resuming training.
+    
+    Parameters:
+    -----------
+    experiment_name: str
+        Name of the experiment
+    checkpoint_path: str, optional
+        Specific checkpoint path to use. If provided, returns this path if it exists.
+    checkpoint_name: str
+        Name of checkpoint file to look for (default: "last.ckpt")
+        If the named checkpoint doesn't exist, falls back to most recent checkpoint
+    log_dir: str
+        Directory where logs are saved (default: "lightning_logs")
+        
+    Returns:
+    --------
+    checkpoint_path: str or None
+        Path to checkpoint file, or None if not found
+    """
+    # If specific checkpoint provided, verify it exists
+    if checkpoint_path is not None:
+        ckpt_path = Path(checkpoint_path)
+        if ckpt_path.exists():
+            print(f"✓ Using specified checkpoint: {checkpoint_path}")
+            return str(checkpoint_path)
+        else:
+            print(f"⚠ Specified checkpoint not found: {checkpoint_path}")
+            return None
+    
+    # Look in experiment directory
+    checkpoint_dir = Path(log_dir) / experiment_name / "checkpoints"
+    if not checkpoint_dir.exists():
+        print(f"⚠ Checkpoint directory doesn't exist: {checkpoint_dir}")
+        return None
+    
+    # Try to find the named checkpoint
+    named_ckpt = checkpoint_dir / checkpoint_name
+    if named_ckpt.exists():
+        print(f"✓ Found checkpoint: {named_ckpt}")
+        return str(named_ckpt)
+    
+    # Fall back to most recent checkpoint
+    checkpoint_files = sorted(checkpoint_dir.glob('*.ckpt'), key=lambda x: x.stat().st_mtime, reverse=True)
+    if checkpoint_files:
+        print(f"✓ Using most recent checkpoint: {checkpoint_files[0]}")
+        return str(checkpoint_files[0])
+    
+    print(f"⚠ No checkpoints found in {checkpoint_dir}")
+    return None

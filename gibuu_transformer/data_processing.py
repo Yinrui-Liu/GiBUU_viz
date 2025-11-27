@@ -859,7 +859,7 @@ def prepare_propagation_data(pairs_without_changes, pairs_with_changes, stats_pa
         if len(input_tokens) == 0 or len(input_tokens) != len(output_tokens):
             continue
         
-        input_ids = [encode_id(token[1], token[2]) for token in input_tokens]
+        input_ids = [encode_id(int(token[1]), int(token[2])) for token in input_tokens]
         input_feats_unnorm = np.array([[x, y, z, E-m, Px, Py, Pz] 
                                        for ts, _, _, x, y, z, m, E, Px, Py, Pz in input_tokens])
         input_feats = (input_feats_unnorm - feats_mean) / feats_sigma
@@ -879,7 +879,7 @@ def prepare_propagation_data(pairs_without_changes, pairs_with_changes, stats_pa
         if len(input_tokens) == 0:
             continue
         
-        input_ids = [encode_id(token[1], token[2]) for token in input_tokens]
+        input_ids = [encode_id(int(token[1]), int(token[2])) for token in input_tokens]
         input_feats_unnorm = np.array([[x, y, z, E-m, Px, Py, Pz] 
                                        for ts, _, _, x, y, z, m, E, Px, Py, Pz in input_tokens])
         input_feats = (input_feats_unnorm - feats_mean) / feats_sigma
