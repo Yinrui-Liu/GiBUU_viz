@@ -368,3 +368,241 @@ def find_checkpoint(experiment_name, checkpoint_path=None, checkpoint_name="last
     
     print(f"⚠ No checkpoints found in {checkpoint_dir}")
     return None
+
+
+def plot_loss_curves(csv_path, mode='propagation', figsize=(15, 10), title=None, 
+                     logy=True, window_size=None, custom_epoch_ticks=None):
+    """
+    Load and plot training/validation loss curves from PyTorch Lightning CSV logs.
+    
+    Parameters:
+    -----------
+    csv_path: str or Path
+        Path to metrics.csv file (e.g., "lightning_logs/gibuu_propagation/version_0/metrics.csv")
+        or "lightning_logs/gibuu_propagation/combined.csv" for combined versions
+    mode: str
+        Model type: 'propagation' or 'interaction'
+        - 'propagation': plots feature, position, em_zero, em_value, interaction losses
+        - 'interaction': plots total, type, feat losses
+    figsize: tuple
+        Figure size (width, height)
+    title: str, optional
+        Custom title for the plot. If None, uses the csv filename
+    logy: bool
+        Whether to use log scale for y-axis (default: True)
+    window_size: int, optional
+        Window size for rolling average. If None, auto-computed as train_steps/val_steps
+    custom_epoch_ticks: array-like or integer, optional
+        Custom epoch tick marks for secondary x-axis (e.g., np.arange(0, 200, 10))
+        
+    Returns:
+    --------
+    fig, axes: matplotlib figure and axes objects
+    """
+    import pandas as pd
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from pathlib import Path
+    
+    csv_path = Path(csv_path)
+    
+    if not csv_path.exists():
+        print(f"⚠ CSV file not found: {csv_path}")
+        return None, None
+    
+    # Load CSV
+    print(f"Loading metrics from: {csv_path}")
+    df = pd.read_csv(csv_path)
+    print(f"Columns: {list(df.columns)}")
+    
+    # Define loss terms based on mode
+    if mode == 'propagation':
+        loss_terms = {
+            'interaction_loss': 'Interaction Loss (Binary Classification)',
+            'position_loss': 'Position Loss (Δx, Δy, Δz)',
+            'em_zero_loss': 'E/p Zero Classification Loss',
+            'em_value_loss': 'E/p Value Regression Loss',
+            'feature_loss': 'Feature Loss (Combined)'
+        }
+        n_rows, n_cols = 2, 3
+    elif mode == 'interaction':
+        loss_terms = {
+            'loss': 'Total Loss',
+            'type_loss': 'Type Loss (Particle Classification)',
+            'feat_loss': 'Feature Loss (x, y, z, KE, p)'
+        }
+        n_rows, n_cols = 2, 2
+    else:
+        raise ValueError(f"Unknown mode: {mode}. Must be 'propagation' or 'interaction'")
+    
+    # Create subplots
+    n_plots = len(loss_terms)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    axes = axes.flatten()
+    
+    def plot_loss_component(ax, train_col, val_col, loss_name):
+        """Helper to plot a single loss component with train/val curves."""
+        plotted = False
+        
+        # Plot train loss (raw + rolling average)
+        if train_col in df.columns:
+            train_mask = ~df[train_col].isna()
+            if 'step' in df.columns:
+                train_steps = df['step'][train_mask]
+                train_losses = df[train_col][train_mask]
+            else:
+                train_steps = df.index[train_mask]
+                train_losses = df[train_col][train_mask]
+            
+            if len(train_steps) > 0:
+                # Plot raw train (thin, transparent)
+                ax.plot(train_steps, train_losses, label='Train (raw)', 
+                       alpha=0.3, linewidth=0.5, color='blue')
+                plotted = True
+        
+        # Plot val loss
+        if val_col in df.columns:
+            val_mask = ~df[val_col].isna()
+            if 'step' in df.columns:
+                val_steps = df['step'][val_mask]
+                val_losses = df[val_col][val_mask]
+            else:
+                val_steps = df.index[val_mask]
+                val_losses = df[val_col][val_mask]
+            
+            if len(val_steps) > 0:
+                ax.plot(val_steps, val_losses, '.-', label='Validation', 
+                       alpha=0.7, markersize=5, color='orange')
+                plotted = True
+                
+                # Calculate rolling average for train
+                if train_col in df.columns and len(train_steps) > 0:
+                    # Auto-compute window size if not provided
+                    if window_size is None:
+                        window = max(1, len(train_steps) // len(val_steps))
+                    else:
+                        window = window_size
+                    
+                    train_rolling = train_losses.rolling(window=window, center=True).mean()
+                    ax.plot(train_steps, train_rolling, label='Train (rolling avg)', 
+                           alpha=0.8, linewidth=1.5, color='green')
+        
+        if not plotted:
+            ax.text(0.5, 0.5, 'No data', ha='center', va='center', 
+                   transform=ax.transAxes, fontsize=12, color='gray')
+        
+        ax.set_title(loss_name, fontsize=13, fontweight='bold')
+        ax.set_xlabel('Step', fontsize=11)
+        ax.set_ylabel('Loss', fontsize=11)
+        
+        if logy:
+            ax.set_yscale('log')
+        
+        ax.legend(fontsize=10)
+        ax.grid(True, alpha=0.3)
+        
+        # Add secondary x-axis for epoch
+        if 'epoch' in df.columns and val_col in df.columns and plotted:
+            val_mask = ~df[val_col].isna()
+            if val_mask.any() and 'step' in df.columns:
+                ax2 = ax.twiny()
+                ax2.set_xlim(ax.get_xlim())
+                
+                all_epochs = df['epoch'][val_mask].unique()
+                all_epochs = np.sort(all_epochs)
+                
+                if custom_epoch_ticks is not None:
+                    if isinstance(custom_epoch_ticks, int):
+                        # If int, use it as desired number of ticks
+                        num_ticks = custom_epoch_ticks
+                        if len(all_epochs) > num_ticks:
+                            step_size = max(1, len(all_epochs) // num_ticks)
+                            epoch_indices = np.arange(0, len(all_epochs), step_size)
+                            selected_epochs = all_epochs[epoch_indices]
+                        else:
+                            selected_epochs = all_epochs
+                        
+                        step_ticks = []
+                        epoch_labels = []
+                        for e in selected_epochs:
+                            steps = df.loc[df['epoch'] == e, 'step']
+                            if not steps.empty:
+                                step_ticks.append(steps.iloc[0])
+                                epoch_labels.append(int(e))
+                        
+                        if step_ticks:
+                            ax2.set_xticks(step_ticks)
+                            ax2.set_xticklabels(epoch_labels)
+                    else:
+                        # If array-like, use as explicit epoch values
+                        step_ticks = []
+                        for e in custom_epoch_ticks:
+                            steps = df.loc[df['epoch'] == e, 'step']
+                            if not steps.empty:
+                                step_ticks.append(steps.iloc[0])
+                            elif not df.empty and 'epoch' in df.columns:
+                                step_ticks.append(np.interp(e, df['epoch'].dropna(), 
+                                                            df['step'].dropna()))
+                        if step_ticks:
+                            ax2.set_xticks(step_ticks)
+                            ax2.set_xticklabels(custom_epoch_ticks)
+                else:
+                    # Auto-select sparse epoch ticks (max 20 ticks)
+                    if len(all_epochs) > 20:
+                        # Sample every N epochs to get ~20 ticks
+                        step_size = max(1, len(all_epochs) // 20)
+                        epoch_indices = np.arange(0, len(all_epochs), step_size)
+                        selected_epochs = all_epochs[epoch_indices]
+                    else:
+                        selected_epochs = all_epochs
+                    
+                    step_ticks = []
+                    epoch_labels = []
+                    for e in selected_epochs:
+                        steps = df.loc[df['epoch'] == e, 'step']
+                        if not steps.empty:
+                            step_ticks.append(steps.iloc[0])
+                            epoch_labels.append(int(e))
+                    
+                    if step_ticks:
+                        ax2.set_xticks(step_ticks)
+                        ax2.set_xticklabels(epoch_labels)
+                
+                ax2.set_xlabel('Epoch', fontsize=11)
+    
+    # Plot each loss term
+    for idx, (loss_key, loss_name) in enumerate(loss_terms.items()):
+        ax = axes[idx]
+        train_col = f'train_{loss_key}'
+        val_col = f'val_{loss_key}'
+        plot_loss_component(ax, train_col, val_col, loss_name)
+    
+    # Hide unused subplots
+    for idx in range(n_plots, len(axes)):
+        axes[idx].set_visible(False)
+    
+    # Set title
+    if title is None:
+        title = f'{csv_path.stem} - Loss Curves'
+    plt.suptitle(title, fontsize=16, y=1.00)
+    plt.tight_layout()
+    
+    print(f"✓ Loss curves plotted for {mode} model")
+    
+    # Print final loss values
+    max_epoch = int(df['epoch'].max()) if 'epoch' in df.columns else None
+    print("\n" + "="*70)
+    if max_epoch is not None:
+        print(f"FINAL LOSS VALUES (Epoch {max_epoch}):")
+    else:
+        print("FINAL LOSS VALUES:")
+    print("="*70)
+    for loss_key in loss_terms.keys():
+        val_col = f'val_{loss_key}'
+        if val_col in df.columns:
+            final_val = df[val_col].dropna()
+            if len(final_val) > 0:
+                print(f"  {val_col:30s}: {final_val.iloc[-1]:.6f}")
+    print("="*70)
+    
+    return fig, axes

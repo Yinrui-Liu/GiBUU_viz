@@ -17,7 +17,10 @@ from .data_processing import (
     filter_pairs_with_changes,
     build_gibuu_h5_from_root,
     prepare_interaction_data,
-    prepare_propagation_data
+    prepare_propagation_data,
+    subset_interaction_data,
+    subset_propagation_data,
+    load_pairs_from_npz,
 )
 from .visualization import (
     visualize_particles_with_slider, 
@@ -31,7 +34,8 @@ from .utils import (
     save_sequence_data, 
     load_sequence_data,
     list_checkpoints,
-    find_checkpoint
+    find_checkpoint,
+    plot_loss_curves
 )
 from .generation import GiBUUEventGenerator
 from .constants import (
@@ -65,6 +69,9 @@ __all__ = [
     "build_gibuu_h5_from_root",
     "prepare_interaction_data",
     "prepare_propagation_data",
+    "subset_interaction_data",
+    "subset_propagation_data",
+    "load_pairs_from_npz",
     "visualize_particles_with_slider",
     "save_particles_gif",
     "evaluate_model",
@@ -75,6 +82,7 @@ __all__ = [
     "load_sequence_data",
     "list_checkpoints",
     "find_checkpoint",
+    "plot_loss_curves",
     "GiBUUEventGenerator",
     "FEATS_MEAN",
     "FEATS_SIGMA",

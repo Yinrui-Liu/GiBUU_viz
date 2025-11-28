@@ -62,6 +62,86 @@ def extract_particle_sequences(h5_file_path, gr_key="perturbative"):
     return sequences_per_event
 
 
+def load_pairs_from_npz(npz_files, max_pairs=None, random_subset=False, random_seed=42):
+    """
+    Load timestep pairs from NPZ files with flattened format.
+
+    Shared helper for GiBUU_propagation.ipynb and GiBUU_interaction.ipynb.
+
+    Parameters
+    ----------
+    npz_files : list of str
+        Paths to NPZ files produced by GiBUU_dataprep.ipynb.
+    max_pairs : int, optional
+        Maximum number of pairs to load across all files (for quick testing).
+        If None, loads all pairs.
+    random_subset : bool, optional
+        If False (default), takes the first max_pairs pairs in file order
+        (fast, streaming-friendly).
+        If True, randomly selects up to max_pairs pairs (approximately
+        uniform over all pairs in the provided files).
+    random_seed : int, optional
+        Random seed used when random_subset=True.
+
+    Returns
+    -------
+    pairs : list of tuples
+        Each tuple is (input_particles, output_particles) where each is a list
+        of particle tokens:
+        [ts, gibuuID, charge, x, y, z, m, E, Px, Py, Pz]
+    """
+    pairs = []
+    if not npz_files:
+        return pairs
+
+    remaining = max_pairs if max_pairs is not None else None
+    rng = np.random.RandomState(random_seed) if random_subset else None
+
+    for npz_file in npz_files:
+        data = np.load(npz_file)
+
+        input_lengths = data["input_lengths"]
+        output_lengths = data["output_lengths"]
+        input_particles = data["input_particles"]
+        output_particles = data["output_particles"]
+
+        num_pairs_in_file = len(input_lengths)
+        if remaining is not None:
+            num_pairs_in_file = min(num_pairs_in_file, remaining)
+
+        if random_subset:
+            # Sample indices within this file
+            indices = np.arange(len(input_lengths))
+            rng.shuffle(indices)
+            indices = indices[:num_pairs_in_file]
+
+            # Pre-compute offsets for random access
+            inp_offsets = np.concatenate([[0], np.cumsum(input_lengths[:-1])])
+            out_offsets = np.concatenate([[0], np.cumsum(output_lengths[:-1])])
+        else:
+            # Sequential indices
+            indices = np.arange(num_pairs_in_file)
+            inp_offsets = np.concatenate([[0], np.cumsum(input_lengths[:-1])])
+            out_offsets = np.concatenate([[0], np.cumsum(output_lengths[:-1])])
+
+        for idx in indices:
+            inp_len = input_lengths[idx]
+            out_len = output_lengths[idx]
+            inp_offset = int(inp_offsets[idx])
+            out_offset = int(out_offsets[idx])
+
+            inp = input_particles[inp_offset: inp_offset + inp_len].tolist()
+            out = output_particles[out_offset: out_offset + out_len].tolist()
+            pairs.append((inp, out))
+
+        if remaining is not None:
+            remaining -= num_pairs_in_file
+            if remaining <= 0:
+                break
+
+    return pairs
+
+
 def encode_id(gibuu_id, charge, is_real=0):
     """
     Encode particle class to a 12-bit ID
@@ -901,3 +981,109 @@ def prepare_propagation_data(pairs_without_changes, pairs_with_changes, stats_pa
         'target_interaction': target_interaction_list,
         'has_target_features': has_target_features_list
     }
+
+
+def subset_propagation_data(propagation_data, num_samples=None, random_seed=42):
+    """
+    Create a random subset of propagation_data for testing.
+    
+    Parameters:
+    -----------
+    propagation_data: dict
+        Full propagation data dictionary with keys:
+        - 'particle_types': List of lists
+        - 'input_features': List of arrays
+        - 'target_features': List of arrays or None
+        - 'target_interaction': List of binary flags
+        - 'has_target_features': List of bools
+    num_samples: int, optional
+        Number of samples to keep. If None, returns all data.
+    random_seed: int
+        Random seed for reproducibility
+        
+    Returns:
+    --------
+    subset_data: dict
+        Subset of propagation_data with same structure
+    """
+    import random
+    
+    total_samples = len(propagation_data['particle_types'])
+    
+    if num_samples is None or num_samples >= total_samples:
+        return propagation_data
+    
+    # Set random seed
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    
+    # Create random indices
+    indices = list(range(total_samples))
+    random.shuffle(indices)
+    selected_indices = sorted(indices[:num_samples])
+    
+    # Create subset
+    subset_data = {
+        'particle_types': [propagation_data['particle_types'][i] for i in selected_indices],
+        'input_features': [propagation_data['input_features'][i] for i in selected_indices],
+        'target_features': [propagation_data['target_features'][i] for i in selected_indices],
+        'target_interaction': [propagation_data['target_interaction'][i] for i in selected_indices],
+        'has_target_features': [propagation_data['has_target_features'][i] for i in selected_indices]
+    }
+    
+    print(f"Created subset: {len(subset_data['particle_types'])} samples from {total_samples} total")
+    print(f"  Non-interaction steps: {sum(1 for x in subset_data['target_interaction'] if x == 0)}")
+    print(f"  Interaction steps: {sum(subset_data['target_interaction'])}")
+    
+    return subset_data
+
+
+def subset_interaction_data(interaction_data, num_samples=None, random_seed=42):
+    """
+    Create a random subset of interaction_data for testing.
+    
+    Parameters:
+    -----------
+    interaction_data: dict
+        Full interaction data dictionary with keys:
+        - 'input_encoded_ids': List of lists
+        - 'input_particle_feats': List of lists
+        - 'output_encoded_ids': List of lists
+        - 'output_particle_feats': List of lists
+    num_samples: int, optional
+        Number of samples to keep. If None, returns all data.
+    random_seed: int
+        Random seed for reproducibility
+        
+    Returns:
+    --------
+    subset_data: dict
+        Subset of interaction_data with same structure
+    """
+    import random
+    
+    total_samples = len(interaction_data['input_encoded_ids'])
+    
+    if num_samples is None or num_samples >= total_samples:
+        return interaction_data
+    
+    # Set random seed
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    
+    # Create random indices
+    indices = list(range(total_samples))
+    random.shuffle(indices)
+    selected_indices = sorted(indices[:num_samples])
+    
+    # Create subset
+    subset_data = {
+        'input_encoded_ids': [interaction_data['input_encoded_ids'][i] for i in selected_indices],
+        'input_particle_feats': [interaction_data['input_particle_feats'][i] for i in selected_indices],
+        'output_encoded_ids': [interaction_data['output_encoded_ids'][i] for i in selected_indices],
+        'output_particle_feats': [interaction_data['output_particle_feats'][i] for i in selected_indices]
+    }
+    
+    print(f"Created subset: {len(subset_data['input_encoded_ids'])} pairs from {total_samples} total")
+    
+    return subset_data
