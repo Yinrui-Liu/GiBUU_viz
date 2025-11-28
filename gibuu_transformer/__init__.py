@@ -7,9 +7,9 @@ A PyTorch-based transformer model for particle sequence generation from GiBUU si
 __version__ = "1.0.0"
 __author__ = ""
 
-from .model import GiBUUTransformer, GiBUUPropagationModel, ParticleEncoder, ParticleDecoder
-from .training import GiBUUSeqOfSetsModel, GiBUUPropagationLightning, train_model
-from .loss import particle_gpt_loss, gibuu_propagation_loss
+from .model import GiBUUTransformer, GiBUUPropagationModel, GiBUUInteractionModel, ParticleEncoder, ParticleDecoder
+from .training import GiBUUSeqOfSetsModel, GiBUUPropagationLightning, GiBUUInteractionLightning, train_model
+from .loss import particle_gpt_loss, gibuu_propagation_loss, gibuu_interaction_loss
 from .data_processing import (
     extract_particle_sequences, 
     prepare_sequence_for_training,
@@ -48,13 +48,16 @@ from .constants import (
 __all__ = [
     "GiBUUTransformer",
     "GiBUUPropagationModel",
+    "GiBUUInteractionModel",
     "ParticleEncoder", 
     "ParticleDecoder",
     "GiBUUSeqOfSetsModel",
     "GiBUUPropagationLightning",
+    "GiBUUInteractionLightning",
     "train_model",
     "particle_gpt_loss",
     "gibuu_propagation_loss",
+    "gibuu_interaction_loss",
     "extract_particle_sequences",
     "prepare_sequence_for_training",
     "extract_timestep_pairs",

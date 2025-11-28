@@ -4,8 +4,8 @@ Training utilities for GiBUU Transformer.
 
 import torch
 import lightning.pytorch as pl
-from .model import GiBUUTransformer
-from .loss import particle_gpt_loss
+from .model import GiBUUTransformer, GiBUUInteractionModel
+from .loss import particle_gpt_loss, gibuu_interaction_loss
 
 
 class GiBUUSeqOfSetsModel(pl.LightningModule):
@@ -333,6 +333,119 @@ class GiBUUPropagationLightning(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=1000,
+            eta_min=1e-6
+        )
+        
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "epoch"
+            }
+        }
+
+
+class GiBUUInteractionLightning(pl.LightningModule):
+    """
+    Lightning module for interaction (encoder-decoder transformer) model.
+    """
+    def __init__(self, cfg):
+        super().__init__()
+        
+        # Model
+        self.net = GiBUUInteractionModel(cfg['model'])
+        
+        # Loss weights
+        self.type_loss_weight = cfg.get('type_loss_weight', 1.0)
+        self.feat_loss_weight = cfg.get('feat_loss_weight', 1.0)
+        
+        # Training config
+        self.lr = cfg.get('lr', 1e-4)
+        self.weight_decay = cfg.get('weight_decay', 1e-5)
+        self.max_epochs = cfg.get('trainer', {}).get('max_epochs', 100)  # For scheduler T_max
+        
+        self.save_hyperparameters()
+    
+    def forward(self, input_encoded_ids, input_particle_feats, input_padding_mask=None,
+                output_encoded_ids=None, output_particle_feats=None, output_padding_mask=None):
+        """
+        Forward pass through the model.
+        """
+        return self.net(
+            input_encoded_ids, input_particle_feats, input_padding_mask,
+            output_encoded_ids, output_particle_feats, output_padding_mask
+        )
+    
+    def training_step(self, batch, batch_idx):
+        """
+        Training step.
+        """
+        # Forward pass with teacher forcing
+        output = self(
+            batch['input_encoded_ids'],
+            batch['input_particle_feats'],
+            batch['input_padding_mask'],
+            batch['output_encoded_ids'],
+            batch['output_particle_feats'],
+            batch['output_padding_mask']
+        )
+        
+        # Compute loss
+        loss_dict = gibuu_interaction_loss(
+            output, batch,
+            type_loss_weight=self.type_loss_weight,
+            feat_loss_weight=self.feat_loss_weight
+        )
+        
+        # Log losses
+        self.log('train_loss', loss_dict['total_loss'], prog_bar=True)
+        self.log('train_type_loss', loss_dict['type_loss'])
+        self.log('train_feat_loss', loss_dict['feat_loss'])
+        
+        return loss_dict['total_loss']
+    
+    def validation_step(self, batch, batch_idx):
+        """
+        Validation step.
+        """
+        # Forward pass with teacher forcing
+        output = self(
+            batch['input_encoded_ids'],
+            batch['input_particle_feats'],
+            batch['input_padding_mask'],
+            batch['output_encoded_ids'],
+            batch['output_particle_feats'],
+            batch['output_padding_mask']
+        )
+        
+        # Compute loss
+        loss_dict = gibuu_interaction_loss(
+            output, batch,
+            type_loss_weight=self.type_loss_weight,
+            feat_loss_weight=self.feat_loss_weight
+        )
+        
+        # Log losses
+        self.log('val_loss', loss_dict['total_loss'], prog_bar=True)
+        self.log('val_type_loss', loss_dict['type_loss'])
+        self.log('val_feat_loss', loss_dict['feat_loss'])
+        
+        return loss_dict['total_loss']
+    
+    def configure_optimizers(self):
+        """
+        Configure optimizer and learning rate scheduler.
+        """
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay
+        )
+        
+        # Learning rate scheduler
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=self.max_epochs,
             eta_min=1e-6
         )
         

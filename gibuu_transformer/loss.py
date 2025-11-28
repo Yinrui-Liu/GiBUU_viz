@@ -392,3 +392,84 @@ def gibuu_propagation_loss(
         'em_value_loss': em_value_loss,
         'interaction_loss': interaction_loss
     }
+
+
+def gibuu_interaction_loss(output, batch, type_loss_weight=1.0, feat_loss_weight=1.0):
+    """
+    Loss function for time step sequence prediction (encoder-decoder with teacher forcing).
+    
+    Following standard translation model practice:
+    - Decoder input: [START, P1, P2, ..., PN, EOS] (includes EOS, length = N+2)
+    - Model predictions: [pred_after_START, pred_after_P1, ..., pred_after_PN, pred_after_EOS]
+    - Targets: [P1, P2, ..., PN, EOS] = decoder_input[:, 1:] (shifted by 1)
+    
+    Parameters:
+    -----------
+    output: dict
+        Model output with 'particle_types', 'particle_feats'
+    batch: dict
+        Contains 'output_encoded_ids' (decoder input), 'output_particle_feats', 'output_padding_mask'
+    type_loss_weight: float
+        Weight for particle type classification loss
+    feat_loss_weight: float
+        Weight for particle feature regression loss
+        
+    Returns:
+    --------
+    loss: dict
+        Dictionary with 'total_loss', 'type_loss', 'feat_loss'
+    """
+    particle_types = output['particle_types']  # (batch, seq_len, num_classes)
+    particle_feats = output['particle_feats']  # (batch, seq_len, 7)
+    
+    # Decoder input: [START, P1, P2, ..., PN, EOS] (includes EOS)
+    decoder_input_ids = batch['output_encoded_ids']  # (batch, seq_len)
+    decoder_input_feats = batch['output_particle_feats']  # (batch, seq_len, 7)
+    output_padding_mask = batch['output_padding_mask']  # (batch, seq_len)
+    
+    # Compute targets by shifting decoder input (remove START token)
+    target_types = decoder_input_ids[:, 1:]  # (batch, seq_len-1)
+    target_feats = decoder_input_feats[:, 1:]  # (batch, seq_len-1, 7)
+    target_padding_mask = output_padding_mask[:, 1:]  # (batch, seq_len-1)
+    valid_mask = ~target_padding_mask  # (batch, seq_len-1) - True for valid positions
+    
+    # Align predictions with targets
+    particle_types_aligned = particle_types[:, :target_types.size(1)]  # (batch, seq_len-1, num_classes)
+    particle_feats_aligned = particle_feats[:, :target_feats.size(1)]  # (batch, seq_len-1, 7)
+    
+    # Type loss (cross-entropy) - includes EOS
+    type_loss = F.cross_entropy(
+        particle_types_aligned.reshape(-1, particle_types_aligned.size(-1)),
+        target_types.reshape(-1),
+        reduction='none'
+    )
+    type_loss = type_loss.reshape(particle_types_aligned.shape[:2])
+    
+    # Apply padding mask (EOS is included in type loss, PAD positions are excluded)
+    type_loss = (type_loss * valid_mask.float()).sum() / valid_mask.sum().clamp(min=1)
+    
+    # Feature loss (MSE) - exclude EOS (only on particle positions)
+    eos_positions = (target_types == EOS_STEP_TOKEN)  # (batch, seq_len-1)
+    valid_feat_mask = valid_mask & (~eos_positions)  # Valid positions AND not EOS
+    
+    feat_loss = F.mse_loss(
+        particle_feats_aligned.reshape(-1, 7),
+        target_feats.reshape(-1, 7),
+        reduction='none'
+    ).mean(dim=1)
+    feat_loss = feat_loss.reshape(particle_feats_aligned.shape[:2])
+    
+    # Apply mask (exclude EOS from feature loss)
+    feat_loss = (feat_loss * valid_feat_mask.float()).sum() / valid_feat_mask.sum().clamp(min=1)
+    
+    # Combine losses
+    total_loss = (
+        type_loss_weight * type_loss +
+        feat_loss_weight * feat_loss
+    )
+    
+    return {
+        'total_loss': total_loss,
+        'type_loss': type_loss,
+        'feat_loss': feat_loss
+    }

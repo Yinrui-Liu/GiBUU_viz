@@ -502,3 +502,137 @@ class GiBUUPropagationModel(nn.Module):
                 'interaction_prediction': interaction_prediction,
                 'predicted_deltas': predicted_deltas
             }
+
+
+class GiBUUInteractionModel(nn.Module):
+    """
+    Encoder-Decoder Transformer that predicts particles at time step t+1 given particles at time step t.
+    
+    Architecture:
+    - Encoder Input: [P1(t1), P2(t1), ..., Pn(t1), EOS, PAD, PAD, ...] (time step t1)
+    - Decoder Input: [<START>, P1(t2), P2(t2), ..., Pm(t2), EOS, PAD, ...] (time step t2, for teacher forcing, INCLUDES EOS)
+    - Decoder Output: [pred1, pred2, ..., pred_m, pred_EOS, ...] (predictions at each decoder position)
+    - Targets: [P1(t2), P2(t2), ..., Pm(t2), EOS, PAD, ...] (decoder_input[:, 1:], shifted by 1)
+    
+    Attention:
+    - Encoder: Bidirectional (all particles in t1 can attend to each other)
+    - Decoder Self-Attention: Bidirectional (all particles in t2 can attend to each other)
+    - Decoder Cross-Attention: Bidirectional (can attend to all encoder positions)
+    
+    Note: Unlike standard autoregressive models, decoder uses bidirectional attention because
+    particles in the same timestep exist simultaneously and should be able to interact with each other.
+    Generation is still sequential (one particle at a time), but each particle can attend to all
+    previously generated particles in the same timestep.
+    """
+    
+    def __init__(self, cfg):
+        super().__init__()
+        
+        # Particle encoder (reuse from package) - used for both encoder and decoder
+        self.particle_encoder = ParticleEncoder(cfg)
+        
+        # Transformer encoder (processes input time step t1)
+        layer_cfg = cfg['transformer']['layer'].copy()
+        d_model = layer_cfg['d_model']
+        
+        # Add default values if missing
+        layer_cfg.setdefault('dim_feedforward', 512)
+        layer_cfg.setdefault('dropout', 0.1)
+        
+        encoder_layer = nn.TransformerEncoderLayer(**layer_cfg)
+        encoder_norm = nn.LayerNorm(d_model)
+        
+        self.encoder = nn.TransformerEncoder(
+            encoder_layer,
+            norm=encoder_norm,
+            num_layers=cfg['transformer'].get('encoder', {}).get('num_layers', 4)
+        )
+        
+        # Transformer decoder (generates output time step t2)
+        decoder_layer = nn.TransformerDecoderLayer(**layer_cfg)
+        decoder_norm = nn.LayerNorm(d_model)
+        
+        self.decoder = nn.TransformerDecoder(
+            decoder_layer, 
+            norm=decoder_norm,
+            num_layers=cfg['transformer']['decoder'].get('num_layers', 4)
+        )
+        
+        # Particle decoder (reuse from package)
+        self.particle_decoder = ParticleDecoder(cfg)
+    
+    def forward(
+        self, 
+        input_encoded_ids, 
+        input_particle_feats, 
+        input_padding_mask=None,
+        output_encoded_ids=None,
+        output_particle_feats=None,
+        output_padding_mask=None
+    ):
+        """
+        Forward pass with encoder-decoder architecture.
+        
+        Parameters:
+        -----------
+        input_encoded_ids: tensor (batch, input_seq_len)
+            Encoded particle IDs at time step t1
+        input_particle_feats: tensor (batch, input_seq_len, 7)
+            Particle features at time step t1
+        input_padding_mask: tensor (batch, input_seq_len), optional
+            Padding mask for input particles (True = padding)
+        output_encoded_ids: tensor (batch, output_seq_len), optional
+            Encoded particle IDs at time step t2 (for teacher forcing during training)
+            Should include <START> token at the beginning: [<START>, P1(t2), P2(t2), ..., EOS, PAD, ...]
+        output_particle_feats: tensor (batch, output_seq_len, 7), optional
+            Particle features at time step t2 (for teacher forcing during training)
+        output_padding_mask: tensor (batch, output_seq_len), optional
+            Padding mask for output particles (True = padding)
+            
+        Returns:
+        --------
+        output: dict
+            Dictionary containing:
+            - 'particle_types': Logits for particle type prediction (batch, output_seq_len, num_classes)
+            - 'particle_feats': Decoded particle features (batch, output_seq_len, 7)
+        """
+        device = input_encoded_ids.device
+        
+        # ========== ENCODER: Process input time step t1 ==========
+        # Encode input particles
+        input_embeddings = self.particle_encoder(input_encoded_ids, input_particle_feats)
+        
+        # Pass through encoder (bidirectional attention)
+        encoder_output = self.encoder(
+            input_embeddings,
+            src_key_padding_mask=input_padding_mask
+        )  # (batch, input_seq_len, d_model)
+        
+        # ========== DECODER: Generate output time step t2 ==========
+        if output_encoded_ids is not None:
+            # Training mode: teacher forcing
+            # Decoder input: [<START>, P1(t2), P2(t2), ..., PN(t2), EOS, PAD, ...]
+            output_embeddings = self.particle_encoder(output_encoded_ids, output_particle_feats)
+            
+            # Pass through decoder (bidirectional self-attention)
+            decoder_output = self.decoder(
+                output_embeddings,  # tgt: decoder input
+                encoder_output,     # memory: encoder output
+                tgt_key_padding_mask=output_padding_mask,  # Padding mask for decoder
+                tgt_mask=None,  # No causal mask for bidirectional attention
+                memory_key_padding_mask=input_padding_mask  # Padding mask for encoder memory
+            )  # (batch, output_seq_len, d_model)
+        else:
+            # Inference mode: will generate autoregressively (not implemented in forward)
+            raise ValueError("Inference mode (autoregressive generation) should be handled separately. "
+                           "Provide output_encoded_ids for training mode.")
+        
+        # Decode to particle types and features
+        particle_types, particle_feats = self.particle_decoder(decoder_output)
+        
+        output = {
+            'particle_types': particle_types,  # (batch, output_seq_len, num_classes)
+            'particle_feats': particle_feats   # (batch, output_seq_len, 7)
+        }
+        
+        return output

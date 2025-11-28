@@ -150,8 +150,8 @@ def prepare_sequence_for_training(raw_sequences, max_seq_len=6000, recursive_tru
                 
                 current_time_step = ts
                 
-                # Encode particle ID
-                encoded_id = encode_id(gibuu_id, charge)
+                # Encode particle ID (convert to int to handle float inputs from NPZ)
+                encoded_id = encode_id(int(gibuu_id), int(charge))
                 
                 # Create token: [encoded_id, x, y, z, E, Px, Py, Pz]
                 processed_token = [encoded_id, x, y, z, E-m, Px, Py, Pz]
@@ -754,7 +754,7 @@ def prepare_interaction_data(pairs, stats_path=None, save_stats_path=None):
         input_feats = []
         for token in input_tokens:
             ts, gibuu_id, charge, x, y, z, m, E, Px, Py, Pz = token
-            encoded_id = encode_id(gibuu_id, charge)
+            encoded_id = encode_id(int(gibuu_id), int(charge))
             features = np.array([x, y, z, E-m, Px, Py, Pz])
             features = (features - np.array(FEATS_MEAN)) / np.array(FEATS_SIGMA)
             input_ids.append(encoded_id)
@@ -769,7 +769,7 @@ def prepare_interaction_data(pairs, stats_path=None, save_stats_path=None):
         
         for token in output_tokens:
             ts, gibuu_id, charge, x, y, z, m, E, Px, Py, Pz = token
-            encoded_id = encode_id(gibuu_id, charge)
+            encoded_id = encode_id(int(gibuu_id), int(charge))
             features = np.array([x, y, z, E-m, Px, Py, Pz])
             features = (features - np.array(FEATS_MEAN)) / np.array(FEATS_SIGMA)
             output_ids.append(encoded_id)
