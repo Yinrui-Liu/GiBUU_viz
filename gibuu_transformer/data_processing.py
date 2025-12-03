@@ -1087,3 +1087,188 @@ def subset_interaction_data(interaction_data, num_samples=None, random_seed=42):
     print(f"Created subset: {len(subset_data['input_encoded_ids'])} pairs from {total_samples} total")
     
     return subset_data
+
+
+def extract_first_last_pairs(raw_sequences):
+    """
+    Extract pairs of first time step -> last time step from each event sequence.
+    Used for FSI (Final State Interaction) training where we predict the final state
+    from the initial state.
+    
+    No truncation - keeps all particles. Padding happens later in collate function.
+    
+    Parameters:
+    -----------
+    raw_sequences: List of lists
+        Each inner list is a sequence of particle tokens: [ts, gibuuID, chg, x, y, z, m, E, Px, Py, Pz]
+        
+    Returns:
+    --------
+    pairs: List of tuples
+        Each tuple is (input_tokens, output_tokens) where:
+        - input_tokens: List of tokens at the FIRST time step (variable length, no truncation)
+        - output_tokens: List of tokens at the LAST time step (variable length, no truncation)
+    """
+    pairs = []
+    
+    for sequence in raw_sequences:
+        if len(sequence) == 0:
+            continue
+            
+        # Group particles by time step
+        time_steps = {}
+        for token in sequence:
+            ts = token[0]
+            if ts not in time_steps:
+                time_steps[ts] = []
+            time_steps[ts].append(token)
+        
+        # Sort time steps
+        sorted_ts = sorted(time_steps.keys())
+        
+        # Need at least 2 time steps to create a pair
+        if len(sorted_ts) < 2:
+            continue
+        
+        # Get first and last time steps
+        first_ts = sorted_ts[0]
+        last_ts = sorted_ts[-1]
+        
+        input_tokens = time_steps[first_ts]
+        output_tokens = time_steps[last_ts]
+        
+        # No truncation - keep all particles, padding happens in collate function
+        pairs.append((input_tokens, output_tokens))
+    
+    return pairs
+
+
+def prepare_fsi_data(pairs, stats_path=None, save_stats_path=None, mask_position_features=False):
+    """
+    Prepare FSI (Final State Interaction) pairs for transformer training (encoder-decoder architecture).
+    
+    Prepares pairs where input is the first time step and output is the last time step of each event.
+    Returns variable-length sequences (padding happens in collate_fn).
+    
+    Parameters:
+    -----------
+    pairs: List of tuples
+        Each tuple is (input_tokens, output_tokens) where tokens are:
+        [ts, gibuuID, chg, x, y, z, m, E, Px, Py, Pz]
+        input_tokens: particles from first time step
+        output_tokens: particles from last time step
+    stats_path: str, optional
+        Path to load pre-computed feature statistics
+    save_stats_path: str, optional
+        Path to save computed feature statistics
+    mask_position_features: bool, optional
+        If True, sets position features (x, y, z) to zero in both input and output.
+        This is useful for FSI where positions may not be as relevant.
+        Default: False
+        
+    Returns:
+    --------
+    data_dict: dict
+        Dictionary containing:
+        - 'input_encoded_ids': List of lists (encoder input: particles + EOS)
+        - 'input_particle_feats': List of lists (encoder input features)
+        - 'output_encoded_ids': List of lists (decoder input: START + particles + EOS)
+        - 'output_particle_feats': List of lists (decoder input features)
+    """
+    from .constants import EOS_STEP_TOKEN, START_TOKEN
+    from .utils import calculate_feature_statistics, load_feature_statistics
+    
+    print(f"Preparing {len(pairs)} FSI pairs (first step -> last step) for training...")
+    if mask_position_features:
+        print("  Note: Position features (x, y, z) will be masked (set to zero)")
+    
+    # Handle feature statistics
+    global FEATS_MEAN, FEATS_SIGMA
+    from . import constants
+    
+    if stats_path:
+        FEATS_MEAN, FEATS_SIGMA = load_feature_statistics(stats_path)
+        constants.FEATS_MEAN = FEATS_MEAN
+        constants.FEATS_SIGMA = FEATS_SIGMA
+    elif constants.FEATS_MEAN is None or constants.FEATS_SIGMA is None:
+        print("Calculating feature statistics...")
+        all_tokens = []
+        for input_tokens, _ in pairs:
+            all_tokens.extend(input_tokens)
+        FEATS_MEAN, FEATS_SIGMA = calculate_feature_statistics([all_tokens], save_stats_path)
+        constants.FEATS_MEAN = FEATS_MEAN
+        constants.FEATS_SIGMA = FEATS_SIGMA
+    else:
+        FEATS_MEAN = constants.FEATS_MEAN
+        FEATS_SIGMA = constants.FEATS_SIGMA
+    
+    # Process pairs
+    input_encoded_ids_list = []
+    input_particle_feats_list = []
+    output_encoded_ids_list = []
+    output_particle_feats_list = []
+    
+    eos_feats = [0.0] * 7
+    start_feats = [0.0] * 7
+    
+    for input_tokens, output_tokens in pairs:
+        # Encoder input: [P1, P2, ..., EOS]
+        input_ids = []
+        input_feats = []
+        for token in input_tokens:
+            ts, gibuu_id, charge, x, y, z, m, E, Px, Py, Pz = token
+            encoded_id = encode_id(int(gibuu_id), int(charge))
+            features = np.array([x, y, z, E-m, Px, Py, Pz])
+            
+            # Mask position features if requested
+            if mask_position_features:
+                features[0] = 0.0  # x
+                features[1] = 0.0  # y
+                features[2] = 0.0  # z
+            
+            features = (features - np.array(FEATS_MEAN)) / np.array(FEATS_SIGMA)
+            input_ids.append(encoded_id)
+            input_feats.append(features.tolist())
+        
+        input_ids.append(EOS_STEP_TOKEN)
+        input_feats.append(eos_feats)
+        
+        # Decoder input: [START, P1, P2, ..., EOS]
+        output_ids = [START_TOKEN]
+        output_feats = [start_feats]
+        
+        for token in output_tokens:
+            ts, gibuu_id, charge, x, y, z, m, E, Px, Py, Pz = token
+            encoded_id = encode_id(int(gibuu_id), int(charge))
+            features = np.array([x, y, z, E-m, Px, Py, Pz])
+            
+            # Mask position features if requested
+            if mask_position_features:
+                features[0] = 0.0  # x
+                features[1] = 0.0  # y
+                features[2] = 0.0  # z
+            
+            features = (features - np.array(FEATS_MEAN)) / np.array(FEATS_SIGMA)
+            output_ids.append(encoded_id)
+            output_feats.append(features.tolist())
+        
+        output_ids.append(EOS_STEP_TOKEN)
+        output_feats.append(eos_feats)
+        
+        input_encoded_ids_list.append(input_ids)
+        input_particle_feats_list.append(input_feats)
+        output_encoded_ids_list.append(output_ids)
+        output_particle_feats_list.append(output_feats)
+    
+    print(f"✓ Prepared {len(pairs)} FSI pairs")
+    print(f"  Features: [x, y, z, KE, Px, Py, Pz] where KE = E - m")
+    print(f"  Normalization: (feature - FEATS_MEAN) / FEATS_SIGMA")
+    if mask_position_features:
+        print(f"  Position features (x, y, z) masked (set to zero)")
+    
+    return {
+        'input_encoded_ids': input_encoded_ids_list,
+        'input_particle_feats': input_particle_feats_list,
+        'output_encoded_ids': output_encoded_ids_list,
+        'output_particle_feats': output_particle_feats_list
+    }
