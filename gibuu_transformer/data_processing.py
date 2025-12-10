@@ -1272,3 +1272,205 @@ def prepare_fsi_data(pairs, stats_path=None, save_stats_path=None, mask_position
         'output_encoded_ids': output_encoded_ids_list,
         'output_particle_feats': output_particle_feats_list
     }
+
+
+class FSIStreamingDataset(IterableDataset):
+    """
+    Memory-efficient IterableDataset that streams FSI pairs from one or more NPZ files.
+    Loads pairs on-the-fly and prepares them for training (encoding, normalization, etc.).
+    Yields all items with a 'split' field indicating train/val assignment.
+    Uses deterministic hashing for consistent train/val split and optional shuffling.
+    """
+    
+    def __init__(self, npz_file_paths, split_ratio: float = 0.8, shuffle: bool = True, 
+                 mask_position_features: bool = False):
+        self.npz_file_paths = list(npz_file_paths)
+        self.split_ratio = float(split_ratio)
+        self.shuffle = shuffle
+        self.mask_position_features = mask_position_features
+        
+        # Ensure feature statistics are loaded
+        from . import constants
+        global FEATS_MEAN, FEATS_SIGMA
+        if constants.FEATS_MEAN is None or constants.FEATS_SIGMA is None:
+            raise ValueError("FEATS_MEAN and FEATS_SIGMA must be set before using FSIStreamingDataset")
+        FEATS_MEAN = constants.FEATS_MEAN
+        FEATS_SIGMA = constants.FEATS_SIGMA
+    
+    @staticmethod
+    def _get_split(file_path: str, idx: int, split_ratio: float) -> str:
+        # Stable hash independent of Python's randomized hash
+        import hashlib
+        key = f"{file_path}:{idx}".encode("utf-8")
+        h = hashlib.md5(key).hexdigest()
+        bucket = int(h[:8], 16) % 100  # 0..99
+        return "train" if bucket < int(split_ratio * 100) else "val"
+    
+    def _prepare_pair(self, input_tokens, output_tokens):
+        """Prepare a single FSI pair for training."""
+        from .constants import EOS_STEP_TOKEN, START_TOKEN
+        
+        eos_feats = [0.0] * 7
+        start_feats = [0.0] * 7
+        
+        # Encoder input: [P1, P2, ..., EOS]
+        input_ids = []
+        input_feats = []
+        for token in input_tokens:
+            ts, gibuu_id, charge, x, y, z, m, E, Px, Py, Pz = token
+            encoded_id = encode_id(int(gibuu_id), int(charge))
+            features = np.array([x, y, z, E-m, Px, Py, Pz])
+            
+            # Mask position features if requested
+            if self.mask_position_features:
+                features[0] = 0.0  # x
+                features[1] = 0.0  # y
+                features[2] = 0.0  # z
+            
+            features = (features - np.array(FEATS_MEAN)) / np.array(FEATS_SIGMA)
+            input_ids.append(encoded_id)
+            input_feats.append(features.tolist())
+        
+        input_ids.append(EOS_STEP_TOKEN)
+        input_feats.append(eos_feats)
+        
+        # Decoder input: [START, P1, P2, ..., EOS]
+        output_ids = [START_TOKEN]
+        output_feats = [start_feats]
+        
+        for token in output_tokens:
+            ts, gibuu_id, charge, x, y, z, m, E, Px, Py, Pz = token
+            encoded_id = encode_id(int(gibuu_id), int(charge))
+            features = np.array([x, y, z, E-m, Px, Py, Pz])
+            
+            # Mask position features if requested
+            if self.mask_position_features:
+                features[0] = 0.0  # x
+                features[1] = 0.0  # y
+                features[2] = 0.0  # z
+            
+            features = (features - np.array(FEATS_MEAN)) / np.array(FEATS_SIGMA)
+            output_ids.append(encoded_id)
+            output_feats.append(features.tolist())
+        
+        output_ids.append(EOS_STEP_TOKEN)
+        output_feats.append(eos_feats)
+        
+        return {
+            'input_encoded_ids': input_ids,
+            'input_particle_feats': input_feats,
+            'output_encoded_ids': output_ids,
+            'output_particle_feats': output_feats
+        }
+    
+    def __iter__(self):
+        from time import time
+        
+        # Check if we have any files to process
+        if not self.npz_file_paths:
+            print("FSIStreamingDataset: No NPZ files provided, yielding nothing")
+            return
+        
+        # Seed per worker to change order across epochs
+        worker_info = torch.utils.data.get_worker_info()
+        try:
+            base_seed = torch.initial_seed() % (2**32 - 1)
+        except:
+            base_seed = 0
+        rng = np.random.RandomState(base_seed)
+        worker_id = worker_info.id if worker_info is not None else 0
+        num_workers = worker_info.num_workers if worker_info is not None else 1
+        
+        print(f"FSIStreamingDataset: Worker {worker_id}/{num_workers}, shuffle={self.shuffle}")
+        print(f"FSIStreamingDataset: Processing {len(self.npz_file_paths)} files")
+        
+        for file_idx, fp in enumerate(self.npz_file_paths):
+            file_start = time()
+            print(f"FSIStreamingDataset: Loading file {file_idx+1}/{len(self.npz_file_paths)}: {fp}")
+            
+            load_start = time()
+            with np.load(fp, allow_pickle=True) as data:
+                load_time = time() - load_start
+                
+                # Reconstruct pairs from flattened format
+                input_particles = data['input_particles']
+                output_particles = data['output_particles']
+                input_lengths = data['input_lengths']
+                output_lengths = data['output_lengths']
+                
+                num_pairs = len(input_lengths)
+                print(f"FSIStreamingDataset: File loaded in {load_time:.2f}s, has {num_pairs} pairs")
+                
+                # Compute offsets for random access
+                input_offsets = np.concatenate([[0], np.cumsum(input_lengths[:-1])])
+                output_offsets = np.concatenate([[0], np.cumsum(output_lengths[:-1])])
+                
+                # Create indices
+                indices = np.arange(num_pairs)
+                if self.shuffle:
+                    rng.shuffle(indices)
+                
+                # Shard indices across workers
+                if num_workers > 1:
+                    indices = indices[worker_id::num_workers]
+                    print(f"FSIStreamingDataset: Worker {worker_id} processing {len(indices)} pairs")
+                
+                items_yielded = 0
+                yield_start = time()
+                for i in indices:
+                    # Reconstruct pair
+                    inp_start = int(input_offsets[i])
+                    inp_end = inp_start + int(input_lengths[i])
+                    out_start = int(output_offsets[i])
+                    out_end = out_start + int(output_lengths[i])
+                    
+                    input_tokens = input_particles[inp_start:inp_end].tolist()
+                    output_tokens = output_particles[out_start:out_end].tolist()
+                    
+                    # Prepare pair for training
+                    item = self._prepare_pair(input_tokens, output_tokens)
+                    
+                    # Add split field
+                    item['split'] = self._get_split(fp, int(i), self.split_ratio)
+                    
+                    items_yielded += 1
+                    yield item
+                    
+                    if items_yielded % 1000 == 0:
+                        yield_time = time() - yield_start
+                        rate = items_yielded / yield_time if yield_time > 0 else 0
+                        yield_start = time()  # Reset timer
+                
+                file_time = time() - file_start
+                print(f"FSIStreamingDataset: Completed {fp} in {file_time:.2f}s, yielded {items_yielded} pairs")
+
+
+class FSISplitFilterDataset(IterableDataset):
+    """
+    Wrapper that filters items from FSIStreamingDataset by split type.
+    """
+    
+    def __init__(self, base_dataset: FSIStreamingDataset, split: str):
+        assert split in ("train", "val")
+        self.base_dataset = base_dataset
+        self.split = split
+    
+    def __iter__(self):
+        from time import time
+        
+        filter_start = time()
+        items_seen = 0
+        items_yielded = 0
+        for item in self.base_dataset:
+            items_seen += 1
+            if item['split'] == self.split:
+                # Remove split field before yielding
+                del item['split']
+                items_yielded += 1
+                yield item
+                if items_yielded % 1000 == 0:
+                    filter_time = time() - filter_start
+                    rate = items_yielded / filter_time if filter_time > 0 else 0
+        
+        total_time = time() - filter_start
+        print(f"FSISplitFilterDataset({self.split}): Final - yielded {items_yielded} pairs from {items_seen} total in {total_time:.2f}s")

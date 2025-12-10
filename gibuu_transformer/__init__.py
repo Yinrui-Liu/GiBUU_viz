@@ -23,6 +23,8 @@ from .data_processing import (
     subset_interaction_data,
     subset_propagation_data,
     load_pairs_from_npz,
+    FSIStreamingDataset,
+    FSISplitFilterDataset,
 )
 from .visualization import (
     visualize_particles_with_slider, 
@@ -76,6 +78,8 @@ __all__ = [
     "subset_interaction_data",
     "subset_propagation_data",
     "load_pairs_from_npz",
+    "FSIStreamingDataset",
+    "FSISplitFilterDataset",
     "visualize_particles_with_slider",
     "save_particles_gif",
     "evaluate_model",
